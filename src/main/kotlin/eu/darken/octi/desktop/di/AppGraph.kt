@@ -8,6 +8,7 @@ import eu.darken.octi.desktop.linking.CredentialsStore
 import eu.darken.octi.desktop.linking.LinkController
 import eu.darken.octi.desktop.linking.LinkResult
 import eu.darken.octi.desktop.modules.meta.DeviceMetadataProvider
+import eu.darken.octi.desktop.modules.meta.MetaWriter
 import eu.darken.octi.desktop.protocol.octiserver.OctiServer
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient
 import eu.darken.octi.desktop.protocol.sync.DeviceId
@@ -66,6 +67,7 @@ class AppGraph private constructor(
     val webSocketClient: OctiServerWebSocketClient by lazy {
         OctiServerWebSocketClient(this, syncEventBus)
     }
+    val metaWriter: MetaWriter by lazy { MetaWriter(this) }
 
     init {
         if (initialCredentials != null) {
