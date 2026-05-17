@@ -16,6 +16,8 @@ import eu.darken.octi.desktop.storage.keystore.Keystore
 import eu.darken.octi.desktop.storage.keystore.KeystoreFactory
 import eu.darken.octi.desktop.sync.DeviceListRepo
 import eu.darken.octi.desktop.sync.ModuleReader
+import eu.darken.octi.desktop.sync.OctiServerWebSocketClient
+import eu.darken.octi.desktop.sync.SyncEventBus
 import eu.darken.octi.desktop.ui.nav.Navigator
 import eu.darken.octi.desktop.ui.nav.Screen
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,8 +60,12 @@ class AppGraph private constructor(
      * subscribes. Constructed lazily — the constructor reads [activeClient], which must be
      * initialized first. Property-order matters: keep this below the [_activeClient] field.
      */
+    val syncEventBus: SyncEventBus = SyncEventBus()
     val deviceListRepo: DeviceListRepo by lazy { DeviceListRepo(this) }
     val moduleReader: ModuleReader by lazy { ModuleReader(this) }
+    val webSocketClient: OctiServerWebSocketClient by lazy {
+        OctiServerWebSocketClient(this, syncEventBus)
+    }
 
     init {
         if (initialCredentials != null) {

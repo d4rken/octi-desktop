@@ -37,6 +37,7 @@ fun main() = application {
         },
     )
     log(TAG) { "Octi Desktop ready (deviceId=${graph.deviceId.logLabel})" }
+    graph.webSocketClient.start()
 
     Window(
         onCloseRequest = ::exitApplication,

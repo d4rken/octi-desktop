@@ -25,7 +25,9 @@ import io.ktor.client.plugins.HttpRequestRetry
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.defaultRequest
+import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.head
@@ -105,6 +107,27 @@ class OctiServerHttpClient(
     }
 
     override fun close() = client.close()
+
+    /**
+     * Open a WebSocket session to `/v1/ws` carrying the same Basic auth + Octi-Device-* headers
+     * the REST endpoints use (applied via the shared [defaultRequest]).
+     *
+     * Caller owns the session lifetime — close it when done. Returning the session rather than
+     * a `webSocket { ... }` block lets the reconnect state machine in [OctiServerWebSocketClient]
+     * use structured cancellation via its scope, instead of nesting inside a Ktor lambda.
+     */
+    suspend fun openWebSocketSession(): DefaultClientWebSocketSession {
+        return client.webSocketSession {
+            url.appendPathSegments("ws")
+            // Force ws/wss based on the configured protocol; defaultRequest seeds the http
+            // origin but the WebSocket upgrade path needs the explicit ws-protocol switch.
+            url.protocol = when (url.protocol) {
+                io.ktor.http.URLProtocol.HTTPS -> io.ktor.http.URLProtocol.WSS
+                io.ktor.http.URLProtocol.HTTP -> io.ktor.http.URLProtocol.WS
+                else -> url.protocol
+            }
+        }
+    }
 
     // --- Account ---
 
