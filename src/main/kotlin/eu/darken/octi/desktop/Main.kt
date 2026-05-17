@@ -21,6 +21,7 @@ import eu.darken.octi.desktop.ui.LocalAppGraph
 import eu.darken.octi.desktop.ui.clipboard.ClipboardScreen
 import eu.darken.octi.desktop.ui.dashboard.DashboardScreen
 import eu.darken.octi.desktop.ui.device.DeviceDetailScreen
+import eu.darken.octi.desktop.ui.files.FilesScreen
 import eu.darken.octi.desktop.ui.linking.LinkingScreen
 import eu.darken.octi.desktop.ui.nav.Screen
 import eu.darken.octi.desktop.ui.settings.SettingsScreen
@@ -75,11 +76,6 @@ private fun ScreenRouter(screen: Screen) {
         is Screen.DeviceDetail -> DeviceDetailScreen(deviceId = screen.deviceId)
         Screen.Clipboard -> ClipboardScreen()
         Screen.Settings -> SettingsScreen()
-        is Screen.Files -> {
-            // Files screen lands in Phase G (blob R/W).
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Files screen — Phase G")
-            }
-        }
+        is Screen.Files -> FilesScreen(deviceId = screen.deviceId)
     }
 }

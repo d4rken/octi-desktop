@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -56,6 +57,13 @@ fun DeviceDetailScreen(deviceId: String) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        graph.navigator.navigateTo(
+                            eu.darken.octi.desktop.ui.nav.Screen.Files(deviceId = deviceId),
+                        )
+                    }) {
+                        Icon(Icons.Filled.Folder, contentDescription = "Files")
+                    }
                     IconButton(onClick = { vm.refresh() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                     }
