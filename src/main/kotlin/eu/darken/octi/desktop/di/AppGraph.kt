@@ -14,6 +14,7 @@ import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.storage.Settings
 import eu.darken.octi.desktop.storage.keystore.Keystore
 import eu.darken.octi.desktop.storage.keystore.KeystoreFactory
+import eu.darken.octi.desktop.sync.DeviceListRepo
 import eu.darken.octi.desktop.ui.nav.Navigator
 import eu.darken.octi.desktop.ui.nav.Screen
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,6 +51,13 @@ class AppGraph private constructor(
 
     private val _activeClient = MutableStateFlow<OctiServerHttpClient?>(null)
     val activeClient: StateFlow<OctiServerHttpClient?> = _activeClient.asStateFlow()
+
+    /**
+     * Created eagerly so its `activeClient.flatMapLatest` collector is wired before any UI
+     * subscribes. Constructed lazily — the constructor reads [activeClient], which must be
+     * initialized first. Property-order matters: keep this below the [_activeClient] field.
+     */
+    val deviceListRepo: DeviceListRepo by lazy { DeviceListRepo(this) }
 
     init {
         if (initialCredentials != null) {
