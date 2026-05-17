@@ -79,11 +79,10 @@ class Settings private constructor(
             file: Path = PlatformDetector.configDir().resolve("settings.json"),
         ): Settings {
             Files.createDirectories(file.parent)
-            val data = if (Files.exists(file)) {
+            val initial = if (Files.exists(file)) {
                 val bytes = Files.readAllBytes(file)
                 try {
-                    val raw = json.decodeFromString(SettingsData.serializer(), bytes.toString(Charsets.UTF_8))
-                    migrate(raw)
+                    migrate(json.decodeFromString(SettingsData.serializer(), bytes.toString(Charsets.UTF_8)))
                 } catch (e: Exception) {
                     log(TAG, eu.darken.octi.desktop.common.log.Logging.Priority.WARN, e) {
                         "settings.json unreadable; falling back to defaults"
@@ -93,7 +92,14 @@ class Settings private constructor(
             } else {
                 SettingsData()
             }
-            return Settings(file, json, data).also { it.persist(data) }
+            // Mint a stable deviceId on first launch. Persisted immediately so a crash before
+            // the first user-driven update still preserves the id.
+            val finalized = if (initial.deviceId == null) {
+                initial.copy(deviceId = java.util.UUID.randomUUID().toString())
+            } else {
+                initial
+            }
+            return Settings(file, json, finalized).also { it.persist(finalized) }
         }
 
         private fun migrate(raw: SettingsData): SettingsData {
@@ -112,6 +118,13 @@ class Settings private constructor(
 @Serializable
 data class SettingsData(
     val schemaVersion: Int = 1,
+    /**
+     * Persistent UUID identifying this desktop install to the Octi server. Minted on first
+     * launch (see [Settings.load]) and never rotated — re-linking against a different account
+     * reuses the same deviceId so the server consolidates history under one peer entry. Null
+     * here means "not yet minted"; the load path replaces null with a fresh UUID.
+     */
+    val deviceId: String? = null,
     val deviceLabel: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val syncIntervalSeconds: Int = 300,
