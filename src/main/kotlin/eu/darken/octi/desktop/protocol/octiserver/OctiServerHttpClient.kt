@@ -24,6 +24,9 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpRequestRetry
 import io.ktor.client.plugins.HttpResponseValidator
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.logging.LogLevel
+import io.ktor.client.plugins.logging.Logger
+import io.ktor.client.plugins.logging.Logging as KtorLogging
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -71,6 +74,13 @@ class OctiServerHttpClient(
     private val credentials: OctiServer.Credentials? = null,
 ) : AutoCloseable {
 
+    /**
+     * Base URL — `${address.address}/v1`. Every per-call site builds its full URL from this
+     * via string concat (the version prefix can't be in defaultRequest's URL because Ktor's
+     * merge drops it, see comment in defaultRequest block).
+     */
+    private val baseUrl: String = "${address.address}/v1"
+
     private val client: HttpClient = HttpClient(OkHttp) {
         install(ContentNegotiation) {
             json(Serialization.json)
@@ -87,6 +97,16 @@ class OctiServerHttpClient(
             // on response status here.
         }
         install(WebSockets)
+
+        // TEMP debug: log requests so we can see exactly what URL the WS upgrade hits.
+        install(KtorLogging) {
+            level = LogLevel.INFO
+            logger = object : Logger {
+                override fun log(message: String) {
+                    log(TAG_HTTP, Logging.Priority.INFO) { message }
+                }
+            }
+        }
 
         // Non-2xx responses must throw rather than reach .body() — content negotiation would
         // otherwise try to deserialize an empty error body as the expected DTO and surface
@@ -107,14 +127,11 @@ class OctiServerHttpClient(
         }
 
         defaultRequest {
-            // Bake the version prefix into the base URL — Ktor's defaultRequest URL merge takes
-            // host/port from default but path from per-call, so an `appendPathSegments("v1")`
-            // here gets clobbered when a call does its own appendPathSegments. Keeping the
-            // prefix on the base URL avoids the gotcha. NO trailing slash: takeFrom with a
-            // trailing slash leaves an empty pathSegment at the end, then appendPathSegments
-            // appends after it and you get `/v1//foo` — which Ktor handles for REST but the
-            // WS upgrade endpoint rejects as 404.
-            url.takeFrom("${address.address}/v1")
+            // URL is built explicitly per-call via [baseUrl]. Ktor 3.4's DefaultRequest URL
+            // merge drops the path component when applied to per-call requests (verified
+            // empirically — both takeFrom-string and component-setter forms lose `/v1`).
+            // defaultRequest is kept around purely for the headers that need to ride on every
+            // call (X-Device-ID, Octi-Device-*, Authorization).
             headers {
                 append(DeviceMetadata.HEADER_DEVICE_ID, deviceId.id)
                 append(DeviceMetadata.HEADER_VERSION, deviceMetadata.version)
@@ -157,7 +174,7 @@ class OctiServerHttpClient(
                 protocol = wsProtocol
                 host = address.domain
                 port = address.port
-                appendPathSegments("ws")
+                appendPathSegments("v1", "ws")
             }
         }
     }
@@ -167,28 +184,30 @@ class OctiServerHttpClient(
     /** Register a brand-new device. If [shareCode] is non-null, joins an existing account. */
     suspend fun register(shareCode: String? = null): RegisterResponse {
         return client.post {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("account")
             if (shareCode != null) url.parameters.append("share", shareCode)
         }.body()
     }
 
     suspend fun deleteAccount() {
-        client.delete { url.appendPathSegments("account") }.ensureSuccess()
+        client.delete { url.takeFrom(baseUrl); url.appendPathSegments("account") }.ensureSuccess()
     }
 
     suspend fun createShareCode(): ShareCodeResponse =
-        client.post { url.appendPathSegments("account", "share") }.body()
+        client.post { url.takeFrom(baseUrl); url.appendPathSegments("account", "share") }.body()
 
     suspend fun getAccountStorage(): AccountStorageResponse =
-        client.get { url.appendPathSegments("account", "storage") }.body()
+        client.get { url.takeFrom(baseUrl); url.appendPathSegments("account", "storage") }.body()
 
     // --- Devices ---
 
     suspend fun getDeviceList(): DevicesResponse =
-        client.get { url.appendPathSegments("devices") }.body()
+        client.get { url.takeFrom(baseUrl); url.appendPathSegments("devices") }.body()
 
     suspend fun resetDevices(request: ResetRequest) {
         client.post {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("devices", "reset")
             contentType(ContentType.Application.Json)
             setBody(request)
@@ -196,7 +215,7 @@ class OctiServerHttpClient(
     }
 
     suspend fun deleteDevice(target: DeviceId) {
-        client.delete { url.appendPathSegments("devices", target.id) }.ensureSuccess()
+        client.delete { url.takeFrom(baseUrl); url.appendPathSegments("devices", target.id) }.ensureSuccess()
     }
 
     // --- Module read/write/commit ---
@@ -212,7 +231,8 @@ class OctiServerHttpClient(
     suspend fun readModule(moduleId: ModuleId, targetDeviceId: DeviceId): ModuleReadResult {
         return try {
             val response = client.get {
-                url.appendPathSegments("module", moduleId.id)
+                url.takeFrom(baseUrl)
+            url.appendPathSegments("module", moduleId.id)
                 url.parameters.append("device-id", targetDeviceId.id)
             }
             ModuleReadResult.Ok(
@@ -228,6 +248,7 @@ class OctiServerHttpClient(
     /** POST /v1/module/{moduleId}?device-id={self}. Used for legacy raw writes (meta, clipboard). */
     suspend fun writeModule(moduleId: ModuleId, payload: ByteArray) {
         client.post {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id)
             url.parameters.append("device-id", deviceId.id)
             contentType(ContentType.Application.OctetStream)
@@ -243,6 +264,7 @@ class OctiServerHttpClient(
         ifNoneMatch: String? = null,
     ) {
         client.put {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id)
             url.parameters.append("device-id", deviceId.id)
             contentType(ContentType.Application.Json)
@@ -262,6 +284,7 @@ class OctiServerHttpClient(
         request: CreateSessionRequest,
     ): CreateSessionResponse {
         return client.post {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blob-sessions")
             url.parameters.append("device-id", targetDeviceId.id)
             contentType(ContentType.Application.Json)
@@ -280,6 +303,7 @@ class OctiServerHttpClient(
         targetDeviceId: DeviceId,
     ): SessionStatus {
         val response = client.head {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blob-sessions", sessionId)
             url.parameters.append("device-id", targetDeviceId.id)
         }
@@ -305,6 +329,7 @@ class OctiServerHttpClient(
         chunk: ByteArray,
     ) {
         client.patch {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blob-sessions", sessionId)
             url.parameters.append("device-id", targetDeviceId.id)
             headers { append("Upload-Offset", offset.toString()) }
@@ -320,6 +345,7 @@ class OctiServerHttpClient(
         request: FinalizeSessionRequest,
     ): FinalizeSessionResponse {
         return client.post {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blob-sessions", sessionId, "finalize")
             url.parameters.append("device-id", targetDeviceId.id)
             contentType(ContentType.Application.Json)
@@ -333,6 +359,7 @@ class OctiServerHttpClient(
         targetDeviceId: DeviceId,
     ) {
         client.delete {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blob-sessions", sessionId)
             url.parameters.append("device-id", targetDeviceId.id)
         }.ensureSuccess()
@@ -342,6 +369,7 @@ class OctiServerHttpClient(
 
     suspend fun listBlobs(moduleId: ModuleId, targetDeviceId: DeviceId): BlobListResponse =
         client.get {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blobs")
             url.parameters.append("device-id", targetDeviceId.id)
         }.body()
@@ -353,6 +381,7 @@ class OctiServerHttpClient(
         targetDeviceId: DeviceId,
     ): ByteArray {
         val response = client.get {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blobs", blobId)
             url.parameters.append("device-id", targetDeviceId.id)
         }
@@ -367,6 +396,7 @@ class OctiServerHttpClient(
         ifMatch: String,
     ) {
         client.delete {
+            url.takeFrom(baseUrl)
             url.appendPathSegments("module", moduleId.id, "blobs", blobId)
             url.parameters.append("device-id", targetDeviceId.id)
             headers { append(HttpHeaders.IfMatch, ifMatch) }
@@ -402,6 +432,7 @@ class OctiServerHttpClient(
 
     companion object {
         private val TAG = logTag("OctiServer", "Http")
+        private val TAG_HTTP = logTag("Ktor")
     }
 }
 
