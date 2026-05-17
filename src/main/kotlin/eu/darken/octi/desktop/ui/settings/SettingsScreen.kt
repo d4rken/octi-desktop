@@ -83,6 +83,9 @@ fun SettingsScreen() {
                         graph.settings.update { it.copy(clipboardAutoSync = value) }
                     },
                 )
+                EncryptionModeRow(
+                    keysetType = graph.credentialsStore.load()?.encryptionKeyset?.type,
+                )
                 AccountSection(onUnlink = { graph.unlink() })
             }
         }
@@ -165,6 +168,30 @@ private fun ClipboardSetting(enabled: Boolean, onToggle: (Boolean) -> Unit) {
                 )
             }
             Switch(checked = enabled, onCheckedChange = onToggle)
+        }
+    }
+}
+
+@Composable
+private fun EncryptionModeRow(keysetType: String?) {
+    val isGcmSiv = keysetType == "AES256_GCM_SIV"
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Encryption", style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = keysetType ?: "(not linked)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isGcmSiv) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error,
+            )
+            if (keysetType != null && !isGcmSiv) {
+                Text(
+                    "This account is on the legacy cipher (AES256_SIV). File sharing is " +
+                        "disabled — it needs AES256_GCM_SIV. The keyset is set when the " +
+                        "account is first created on a phone; re-linking adopts the same one.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }

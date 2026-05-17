@@ -77,7 +77,8 @@ class AppGraph private constructor(
         if (initialCredentials != null) {
             _activeClient.value = buildClient(initialCredentials)
             log(TAG, Logging.Priority.INFO) {
-                "Booted with stored credentials for account=${initialCredentials.accountId.id.take(8)}..."
+                "Booted with stored credentials for account=${initialCredentials.accountId.id.take(8)}... " +
+                    "keysetMode=${initialCredentials.encryptionKeyset.type}"
             }
         } else {
             log(TAG, Logging.Priority.INFO) { "No stored credentials; starting in Linking flow" }

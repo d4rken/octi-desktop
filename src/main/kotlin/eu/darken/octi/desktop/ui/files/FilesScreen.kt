@@ -139,8 +139,14 @@ fun FilesScreen(deviceId: String) {
 private fun LegacyKeysetWarning() {
     Card(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = "File sharing requires the newer encryption mode. Open Octi on your phone " +
-                "and re-link this device to enable uploads.",
+            text = "This account uses the legacy encryption mode (AES256_SIV), which doesn't " +
+                "support the streaming AEAD that file sharing needs. The keyset is set when " +
+                "the account is first created on a phone — re-linking the desktop adopts the " +
+                "same keyset, so it won't help here. To enable file sharing you'd need to " +
+                "create a fresh Octi account on a phone running on a device that supports " +
+                "AES-GCM-SIV (most Android API 30+ devices), then link this desktop to that " +
+                "account. Reading peer modules (battery, etc.) still works on this screen's " +
+                "other surfaces.",
             modifier = Modifier.padding(16.dp),
             color = MaterialTheme.colorScheme.onErrorContainer,
             style = MaterialTheme.typography.bodyMedium,

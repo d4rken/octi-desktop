@@ -50,9 +50,12 @@ dependencies {
 
     // Tink (plain Java, wire-compatible with tink-android used by app-main)
     implementation("com.google.crypto.tink:tink:1.16.0")
-    // BouncyCastle: JDK 21's default JCE doesn't ship AES-GCM-SIV. Tink's manager looks it up
-    // by JCE transformation name, so we provide BC. (Android side uses Conscrypt for the same
-    // reason; same wire result.)
+    // Conscrypt-OpenJDK provides AES/GCM-SIV/NoPadding via the same code path the Android side
+    // uses (tink-android also relies on Conscrypt). Pinning the same provider on both sides
+    // eliminates a class of subtle interop bugs where BC's GCM-SIV output didn't match
+    // Conscrypt's for keysets generated on Android — see the Crypto README for the history.
+    implementation("org.conscrypt:conscrypt-openjdk-uber:2.5.2")
+    // BouncyCastle stays in as a fallback for hosts where Conscrypt's native lib can't load.
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     // JNA for OS keystore bindings (Keychain/DPAPI/libsecret)

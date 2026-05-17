@@ -28,7 +28,11 @@ internal object CryptoBootstrap {
     val gcmSivAvailable: Boolean
 
     init {
-        if (!platformHasWorkingGcmSiv()) {
+        // Install Conscrypt first — it matches what tink-android uses on the Android side, so
+        // the AES-GCM-SIV byte output is byte-identical for the same keyset/nonce/plaintext.
+        // BouncyCastle is a fallback for hosts where Conscrypt's native lib can't load (rare
+        // on x86_64 Linux/macOS/Windows, but defensive).
+        if (!installConscrypt() && !platformHasWorkingGcmSiv()) {
             installBouncyCastle()
         }
 
@@ -75,6 +79,26 @@ internal object CryptoBootstrap {
         val ciphertext = aead.encrypt("octi-init-probe".toByteArray(), null)
         aead.decrypt(ciphertext, null).contentEquals("octi-init-probe".toByteArray())
     } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * Install Conscrypt-OpenJDK at JCE priority 1. Returns true on success. Matches the AES-
+     * GCM-SIV implementation tink-android uses, so ciphertext produced on either side is
+     * binary-identical for the same key+nonce+plaintext+AAD.
+     */
+    private fun installConscrypt(): Boolean = try {
+        val conscryptClass = Class.forName("org.conscrypt.Conscrypt")
+        val newProvider = conscryptClass.getMethod("newProvider")
+        val provider = newProvider.invoke(null) as java.security.Provider
+        java.security.Security.insertProviderAt(provider, 1)
+        log(TAG) { "Installed Conscrypt-OpenJDK as JCE provider (priority 1)" }
+        true
+    } catch (_: ClassNotFoundException) {
+        log(TAG, WARN) { "Conscrypt not on classpath; falling back to BouncyCastle" }
+        false
+    } catch (e: Throwable) {
+        log(TAG, WARN, e) { "Conscrypt install failed; falling back to BouncyCastle" }
         false
     }
 
