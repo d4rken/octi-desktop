@@ -18,6 +18,7 @@ import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
 import eu.darken.octi.desktop.di.AppGraph
 import eu.darken.octi.desktop.ui.LocalAppGraph
+import eu.darken.octi.desktop.ui.linking.LinkingScreen
 import eu.darken.octi.desktop.ui.nav.Screen
 import eu.darken.octi.desktop.ui.theme.OctiTheme
 
@@ -59,9 +60,13 @@ private fun OctiDesktopApp() {
 
 @Composable
 private fun ScreenRouter(screen: Screen) {
-    // Placeholder until the per-screen Composables land in D2-D5. Showing the current screen
-    // name confirms the navigator is plumbed through.
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("Screen: $screen — UI lands in next commits")
+    when (screen) {
+        Screen.Linking -> LinkingScreen()
+        else -> {
+            // Placeholder until the remaining screens land in D3-D5.
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Screen: $screen — UI lands in next commits")
+            }
+        }
     }
 }
