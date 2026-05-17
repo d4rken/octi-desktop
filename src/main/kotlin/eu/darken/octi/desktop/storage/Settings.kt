@@ -4,6 +4,9 @@ import eu.darken.octi.desktop.common.files.AtomicWrites
 import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
 import eu.darken.octi.desktop.platform.PlatformDetector
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.IOException
@@ -31,7 +34,11 @@ class Settings private constructor(
 ) {
 
     private val cacheLock = ReentrantReadWriteLock()
+    private val _flow = MutableStateFlow(initial)
     private var cache: SettingsData = initial
+
+    /** Reactive view for Compose / coroutines. Always reflects the latest persisted state. */
+    val flow: StateFlow<SettingsData> = _flow.asStateFlow()
 
     val data: SettingsData
         get() = cacheLock.read { cache }
@@ -46,6 +53,7 @@ class Settings private constructor(
             next
         }
         persist(updated)
+        _flow.value = updated
     }
 
     private fun persist(data: SettingsData) = withFileLock {

@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeviceUnknown
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
@@ -68,6 +69,9 @@ fun DashboardScreen() {
                         IconButton(onClick = { graph.deviceListRepo.kick() }) {
                             Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                         }
+                    }
+                    IconButton(onClick = { graph.navigator.navigateTo(Screen.Clipboard) }) {
+                        Icon(Icons.Filled.ContentPaste, contentDescription = "Clipboard")
                     }
                     IconButton(onClick = { graph.navigator.navigateTo(Screen.Settings) }) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")

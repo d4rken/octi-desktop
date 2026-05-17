@@ -18,10 +18,12 @@ import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
 import eu.darken.octi.desktop.di.AppGraph
 import eu.darken.octi.desktop.ui.LocalAppGraph
+import eu.darken.octi.desktop.ui.clipboard.ClipboardScreen
 import eu.darken.octi.desktop.ui.dashboard.DashboardScreen
 import eu.darken.octi.desktop.ui.device.DeviceDetailScreen
 import eu.darken.octi.desktop.ui.linking.LinkingScreen
 import eu.darken.octi.desktop.ui.nav.Screen
+import eu.darken.octi.desktop.ui.settings.SettingsScreen
 import eu.darken.octi.desktop.ui.theme.OctiTheme
 
 private val TAG = logTag("Main")
@@ -55,7 +57,8 @@ fun main() = application {
 @Composable
 private fun OctiDesktopApp() {
     val graph = LocalAppGraph.current
-    OctiTheme(themeMode = graph.settings.data.themeMode) {
+    val settings by graph.settings.flow.collectAsState()
+    OctiTheme(themeMode = settings.themeMode) {
         Surface(modifier = Modifier.fillMaxSize()) {
             val current by graph.navigator.current.collectAsState()
             ScreenRouter(screen = current)
@@ -69,10 +72,12 @@ private fun ScreenRouter(screen: Screen) {
         Screen.Linking -> LinkingScreen()
         Screen.Dashboard -> DashboardScreen()
         is Screen.DeviceDetail -> DeviceDetailScreen(deviceId = screen.deviceId)
-        else -> {
-            // Files / Clipboard / Settings land in later phases.
+        Screen.Clipboard -> ClipboardScreen()
+        Screen.Settings -> SettingsScreen()
+        is Screen.Files -> {
+            // Files screen lands in Phase G (blob R/W).
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Screen: $screen — UI lands in next commits")
+                Text("Files screen — Phase G")
             }
         }
     }
