@@ -18,7 +18,16 @@ internal class LibsecretKeystore(
     override val backendDescription: String = "Linux libsecret (Secret Service)"
 
     init {
-        val probe = runSecretTool(listOf("--version"), input = null, allowExit = setOf(0, 1))
+        // `secret-tool` has no --version / --help that exits cleanly (both exit 2 because the
+        // parser only knows the subcommand verbs). Probe with a benign `lookup` against an
+        // attribute that almost certainly isn't set: exit 0 = unexpected hit (still proves
+        // the daemon is up), exit 1 = miss (the happy probe path), anything else = no daemon
+        // or no binary, fall back.
+        val probe = runSecretTool(
+            args = listOf("lookup", "_octi_probe", "_octi_probe_value"),
+            input = null,
+            allowExit = setOf(0, 1),
+        )
         if (probe.exitCode != 0 && probe.exitCode != 1) {
             throw KeystoreUnavailableException("secret-tool unavailable: ${probe.stderr}")
         }
