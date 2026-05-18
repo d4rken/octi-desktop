@@ -87,8 +87,8 @@ Before any non-dry-run release works:
 3. **Add the App as a bypass actor** in any branch / tag protection rulesets covering `main`
    and `v*` tags. `GITHUB_TOKEN` cannot be a bypass actor — only installed Apps can.
 
-When the repo moves from `d4rken/octi-desktop` to `d4rken-org/octi-desktop`, steps 1 + 3 are
-re-done at the new location.
+The `d4rken-org-releaser` App is currently installed on `d4rken-org/octi-desktop`. If the
+repo ever moves again, the App install + bypass-actor entries follow the new location.
 
 ## First release caveat
 

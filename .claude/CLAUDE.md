@@ -9,7 +9,7 @@ Desktop companion for [Octi](https://github.com/d4rken-org/octi) — Compose Mul
 - **Package**: `eu.darken.octi.desktop`
 - **Architecture**: Compose Multiplatform desktop (JetBrains 1.7) on Kotlin 2.3 / JDK 21
 - **Independent Gradle build** — does NOT depend on `app-main`. Wire types are copied; drift held back by behavior fixtures.
-- **Remote**: `https://github.com/d4rken/octi-desktop` (moves to `d4rken-org` after first stable release)
+- **Remote**: `https://github.com/d4rken-org/octi-desktop`
 
 ## Rules
 
