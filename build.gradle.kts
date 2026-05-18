@@ -182,11 +182,17 @@ compose.desktop {
 
             modules("java.naming", "jdk.crypto.ec", "java.management", "java.sql")
 
+            // Icons sourced from app-main's launcher PNG so the desktop installer matches the
+            // phone app visually. .ico and .icns generated once locally from the same source
+            // (see src/main/resources/icons/ for the originals).
+            val iconDir = project.file("src/main/resources/icons")
+
             linux {
                 packageName = "octi"
                 debMaintainer = "info@d4rken.eu"
                 menuGroup = "Network"
                 appCategory = "Network"
+                iconFile.set(iconDir.resolve("Octi.png"))
                 // Note: Compose Desktop 1.7's DSL doesn't expose `Depends:` for .deb. Users
                 // need `libsecret-tools` installed for OS-keystore credential storage; the
                 // README documents this. When the passphrase fallback gets a real UI, the
@@ -196,11 +202,23 @@ compose.desktop {
 
             macOS {
                 bundleID = "eu.darken.octi.desktop"
+                iconFile.set(iconDir.resolve("Octi.icns"))
+                // jpackage's DMG packaging rejects MAJOR=0 ("MAJOR must be > 0"). For 0.x.y
+                // releases, the DMG's internal metadata uses a 1.x.y placeholder. The app
+                // itself still reports BuildConfig.VERSION (the real gradle.properties value)
+                // in --version, the window title, and to the server. Affects only what macOS
+                // shows in "Get Info" on the installer — users see the correct version
+                // everywhere else.
+                if (numericVersion.startsWith("0.")) {
+                    val parts = numericVersion.split(".")
+                    dmgPackageVersion = "1.${parts[1]}.${parts[2]}"
+                }
             }
 
             windows {
                 menuGroup = "Octi"
                 upgradeUuid = "9c4b3c1d-2a5d-4f8e-9a3b-7b6c5d4e3f2a"
+                iconFile.set(iconDir.resolve("Octi.ico"))
             }
         }
     }

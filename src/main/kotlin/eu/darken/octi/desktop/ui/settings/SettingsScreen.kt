@@ -9,8 +9,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -35,7 +38,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import eu.darken.octi.desktop.modules.meta.DeviceMetadataProvider
+import eu.darken.octi.desktop.platform.PlatformDetector
 import eu.darken.octi.desktop.storage.ThemeMode
 import eu.darken.octi.desktop.ui.LocalAppGraph
 
@@ -87,6 +95,7 @@ fun SettingsScreen() {
                     keysetType = graph.credentialsStore.load()?.encryptionKeyset?.type,
                 )
                 AccountSection(onUnlink = { graph.unlink() })
+                AboutSection()
             }
         }
     }
@@ -192,6 +201,104 @@ private fun EncryptionModeRow(keysetType: String?) {
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun AboutSection() {
+    val uriHandler = LocalUriHandler.current
+    val clipboard = LocalClipboardManager.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("About", style = MaterialTheme.typography.titleSmall)
+            SelectionContainer {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Octi Desktop", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "Version ${DeviceMetadataProvider.APP_VERSION}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Links", style = MaterialTheme.typography.labelMedium)
+                LinkRow("This app", "https://github.com/d4rken-org/octi-desktop", uriHandler)
+                LinkRow("Octi (Android)", "https://github.com/d4rken-org/octi", uriHandler)
+                LinkRow("Octi Server", "https://github.com/d4rken-org/octi-server", uriHandler)
+                LinkRow("Octi Web", "https://github.com/d4rken-org/octi-web", uriHandler)
+                LinkRow("Discord", "https://discord.gg/s7V4C6zuVy", uriHandler)
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Data paths", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    "Paths the app reads + writes on this machine. Tap the copy button to put a " +
+                        "path on your clipboard.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                PathRow("Config", PlatformDetector.configDir().toString(), clipboard)
+                PathRow("Data", PlatformDetector.dataDir().toString(), clipboard)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LinkRow(
+    label: String,
+    url: String,
+    uriHandler: androidx.compose.ui.platform.UriHandler,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = url,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        TextButton(onClick = { uriHandler.openUri(url) }) { Text("Open") }
+    }
+}
+
+@Composable
+private fun PathRow(
+    label: String,
+    path: String,
+    clipboard: androidx.compose.ui.platform.ClipboardManager,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodySmall)
+            SelectionContainer {
+                Text(
+                    text = path,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        IconButton(
+            onClick = { clipboard.setText(AnnotatedString(path)) },
+            modifier = Modifier.size(28.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.ContentCopy,
+                contentDescription = "Copy $label path",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

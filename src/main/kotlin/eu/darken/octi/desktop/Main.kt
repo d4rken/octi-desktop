@@ -11,9 +11,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.useResource
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import org.jetbrains.skia.Image as SkImage
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import eu.darken.octi.desktop.common.log.Logging.Priority.ERROR
 import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
@@ -80,6 +84,13 @@ fun main(args: Array<String>) {
         server
     }
 
+    // Load the window icon once at startup. Used for the title bar (Linux/Windows) and the
+    // app switcher / cmd-tab list (macOS — though macOS prefers .icns from the .app bundle for
+    // the actual dock icon; this is mainly for development runs via `./gradlew run`).
+    val windowIcon = useResource("icons/Octi.png") { stream ->
+        BitmapPainter(SkImage.makeFromEncoded(stream.readAllBytes()).toComposeImageBitmap())
+    }
+
     application {
         Window(
             onCloseRequest = {
@@ -87,6 +98,7 @@ fun main(args: Array<String>) {
                 exitApplication()
             },
             title = "Octi ${DeviceMetadataProvider.APP_VERSION}",
+            icon = windowIcon,
             state = rememberWindowState(width = 1024.dp, height = 720.dp),
         ) {
             CompositionLocalProvider(LocalAppGraph provides graph) {

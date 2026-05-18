@@ -1,3 +1,5 @@
+<img src="https://github.com/d4rken-org/octi/raw/main/fastlane/metadata/android/en-US/images/featureGraphic.jpg" width="400">
+
 # Octi Desktop
 
 [![GitHub release](https://img.shields.io/github/v/release/d4rken-org/octi-desktop?include_prereleases&logo=github&label=Release)](https://github.com/d4rken-org/octi-desktop/releases/latest)
