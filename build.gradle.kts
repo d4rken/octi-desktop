@@ -1,3 +1,4 @@
+import org.gradle.internal.os.OperatingSystem
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
@@ -159,13 +160,19 @@ compose.desktop {
         mainClass = "eu.darken.octi.desktop.MainKt"
 
         nativeDistributions {
-            targetFormats(
-                TargetFormat.Dmg,         // macOS
-                TargetFormat.Msi,         // Windows
-                TargetFormat.Deb,         // Debian/Ubuntu
-                TargetFormat.Rpm,         // Fedora/RHEL
-                TargetFormat.AppImage,    // Linux portable (post-processed to .AppImage in CI)
-            )
+            // Compose Desktop 1.7 validates every entry in targetFormats against the host OS at
+            // configuration time — listing TargetFormat.AppImage on macOS throws "Unexpected
+            // target format for MacOS: AppImage" even when only running `check`. Scope formats
+            // to the host so each runner only declares what it can actually build.
+            val hostFormats = with(OperatingSystem.current()) {
+                when {
+                    isMacOsX -> arrayOf(TargetFormat.Dmg)
+                    isWindows -> arrayOf(TargetFormat.Msi)
+                    isLinux -> arrayOf(TargetFormat.Deb, TargetFormat.Rpm, TargetFormat.AppImage)
+                    else -> arrayOf(TargetFormat.Deb)
+                }
+            }
+            targetFormats(*hostFormats)
             packageName = "Octi"
             // jpackage requires numeric X.Y.Z — see `numericVersion` above for suffix-stripping.
             packageVersion = numericVersion
