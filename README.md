@@ -1,15 +1,15 @@
 # Octi Desktop
 
-[![GitHub release](https://img.shields.io/github/v/release/d4rken/octi-desktop?include_prereleases&logo=github&label=Release)](https://github.com/d4rken/octi-desktop/releases/latest)
-[![Code tests & eval](https://img.shields.io/github/actions/workflow/status/d4rken/octi-desktop/code-checks.yml?logo=githubactions&label=Code%20tests)](https://github.com/d4rken/octi-desktop/actions/workflows/code-checks.yml)
-[![Gradle wrapper](https://img.shields.io/github/actions/workflow/status/d4rken/octi-desktop/gradle-wrapper-validation.yml?logo=gradle&label=Gradle%20wrapper)](https://github.com/d4rken/octi-desktop/actions/workflows/gradle-wrapper-validation.yml)
-[![License](https://img.shields.io/github/license/d4rken/octi-desktop?label=License)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/d4rken-org/octi-desktop?include_prereleases&logo=github&label=Release)](https://github.com/d4rken-org/octi-desktop/releases/latest)
+[![Code tests & eval](https://img.shields.io/github/actions/workflow/status/d4rken-org/octi-desktop/code-checks.yml?logo=githubactions&label=Code%20tests)](https://github.com/d4rken-org/octi-desktop/actions/workflows/code-checks.yml)
+[![Gradle wrapper](https://img.shields.io/github/actions/workflow/status/d4rken-org/octi-desktop/gradle-wrapper-validation.yml?logo=gradle&label=Gradle%20wrapper)](https://github.com/d4rken-org/octi-desktop/actions/workflows/gradle-wrapper-validation.yml)
+[![License](https://img.shields.io/github/license/d4rken-org/octi-desktop?label=License)](LICENSE)
 
 Desktop companion for [Octi](https://github.com/d4rken-org/octi) — view your phone's modules and share files between your devices from your laptop. Talks to the existing [Octi Server](https://github.com/d4rken-org/octi-server) over the same end-to-end-encrypted protocol the Android app uses. No Google account, no separate backend.
 
 ## Downloads
 
-Grab the latest installer for your OS from [GitHub Releases](https://github.com/d4rken/octi-desktop/releases/latest):
+Grab the latest installer for your OS from [GitHub Releases](https://github.com/d4rken-org/octi-desktop/releases/latest):
 
 | Platform | File |
 |---|---|
