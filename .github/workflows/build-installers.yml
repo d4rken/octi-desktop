@@ -1,0 +1,361 @@
+name: Build installers (reusable)
+
+# Per-OS jpackage build matrix, factored out of release-tag.yml so the same
+# jobs can be reused by other publish flows (e.g. release-nightly.yml).
+#
+# Inputs are designed so the stable release path stays byte-identical: passing
+# the defaults (channel=stable, version-override="") produces the same gradle
+# invocations release-tag.yml ran when these jobs lived inline.
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: "Build channel: 'stable' or 'nightly'. Passed to gradle as -Pchannel=… when not 'stable'."
+        required: false
+        type: string
+        default: stable
+      version-override:
+        description: "Explicit version override (e.g. '0.1.0-nightly.abc12345'). Empty means use gradle.properties as-is."
+        required: false
+        type: string
+        default: ""
+      artifact-prefix:
+        description: "Filename prefix for renamed user-facing outputs (AppImage, tarball, dmg, msi). E.g. 'Octi-0.1.0' or 'Octi-nightly'."
+        required: true
+        type: string
+
+jobs:
+  # Linux on ubuntu-22.04 — older GLIBC (2.35) gives binaries that run on most still-supported
+  # distros. ubuntu-24.04 (GLIBC 2.39) would silently break Ubuntu 22 / Debian stable users.
+  build-linux:
+    name: Build Linux artifacts
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Install rpmbuild + AppImage tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          # appimagetool isn't packaged in Ubuntu repos — pull the upstream continuous build
+          # by SHA256-pinned URL. The .AppImage file from Compose Desktop's packageAppImage
+          # task is actually a *directory*; we wrap it with appimagetool here.
+          APPIMAGETOOL_URL="https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage"
+          APPIMAGETOOL_SHA="df3baf5ca5facbecfc2f3fa6713c29ab9cefa8fd8c1eac5d283b79cab33e4acb"
+          curl -L -o /tmp/appimagetool "$APPIMAGETOOL_URL"
+          echo "$APPIMAGETOOL_SHA  /tmp/appimagetool" | sha256sum -c -
+          chmod +x /tmp/appimagetool
+
+      - name: Resolve effective version
+        id: version
+        env:
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$OVERRIDE" ]]; then
+            v="$OVERRIDE"
+          else
+            v=$(awk -F= '$1=="version"{print $2}' gradle.properties)
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build deb + rpm + AppImage source + portable tarball
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          # Pass -Pversion / -Pchannel only when non-default so the stable path's gradle
+          # invocation stays identical to the pre-refactor release-tag.yml command.
+          args=()
+          if [[ -n "$OVERRIDE" ]]; then args+=("-Pversion=$OVERRIDE"); fi
+          if [[ "$CHANNEL" != "stable" ]]; then args+=("-Pchannel=$CHANNEL"); fi
+          # Note: TargetFormat.AppImage builds the app-image directory under
+          # build/compose/binaries/main/app/Octi/. The real .AppImage file is produced by
+          # appimagetool below.
+          ./gradlew ${args[@]+"${args[@]}"} packageDeb packageRpm packageAppImage createDistributable
+
+      - name: Smoke test built binary
+        run: |
+          set -euo pipefail
+          # Glob the launcher under bin/ — the binary basename matches the app's packageName
+          # (Octi for stable; channel-aware in nightly).
+          launcher=$(find build/compose/binaries/main/app -path '*/bin/Octi*' -type f -print -quit)
+          [[ -n "$launcher" ]] || { echo "::error::no launcher found under build/compose/binaries/main/app/*/bin/"; exit 1; }
+          "$launcher" --version
+          # Exit 0 + the right version string means jlink modules + native libs all loaded.
+
+      - name: Wrap AppImage directory into a real .AppImage file
+        id: appimage
+        continue-on-error: true
+        env:
+          V: ${{ steps.version.outputs.version }}
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          set -euo pipefail
+          # Compose Desktop's packageAppImage outputs to build/compose/binaries/main/app/<packageName>/.
+          # The packageName depends on the build channel (Octi vs OctiNightly), so glob it.
+          APPDIR=/tmp/Octi.AppDir
+          rm -rf "$APPDIR"
+          src_dir=$(find build/compose/binaries/main/app -mindepth 1 -maxdepth 1 -type d -print -quit)
+          [[ -n "$src_dir" ]] || { echo "::error::no app image directory found under build/compose/binaries/main/app"; exit 1; }
+          cp -r "$src_dir" "$APPDIR"
+          # Minimal AppRun + .desktop + icon — required by appimagetool.
+          cat > "$APPDIR/AppRun" <<'APPRUN'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/bin/Octi" "$@"
+          APPRUN
+          chmod +x "$APPDIR/AppRun"
+          cat > "$APPDIR/octi.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Octi
+          Exec=AppRun
+          Icon=octi
+          Categories=Network;
+          Terminal=false
+          DESKTOP
+          # Octi.png is optional; fall back to a 1x1 transparent PNG if the bundle has none.
+          if [ -f "$APPDIR/lib/Octi.png" ]; then
+            cp "$APPDIR/lib/Octi.png" "$APPDIR/octi.png"
+          else
+            printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82' > "$APPDIR/octi.png"
+          fi
+          ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run "$APPDIR" "${PREFIX}-linux-x86_64.AppImage"
+
+      - name: Build portable tarball
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          set -euo pipefail
+          src_dir=$(find build/compose/binaries/main/app -mindepth 1 -maxdepth 1 -type d -print -quit)
+          [[ -n "$src_dir" ]] || { echo "::error::no app image directory found under build/compose/binaries/main/app"; exit 1; }
+          # tar -C <parent> <leafname> keeps the inner directory name (Octi or OctiNightly) intact in the archive.
+          tar -czf "${PREFIX}-linux.tar.gz" -C "$(dirname "$src_dir")" "$(basename "$src_dir")"
+
+      - name: Collect Linux artifacts
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # .deb / .rpm filenames are deterministic from Compose Desktop's naming convention.
+          cp build/compose/binaries/main/deb/*.deb out/ || true
+          cp build/compose/binaries/main/rpm/*.rpm out/ || true
+          cp "${PREFIX}-linux.tar.gz" out/
+          cp "${PREFIX}-linux-x86_64.AppImage" out/ || echo "::warning::AppImage build skipped (post-processing failed)"
+          ls -la out/
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 #v4.4.0
+        with:
+          name: linux-pkgs
+          path: out/*
+          if-no-files-found: error
+
+  build-macos-arm:
+    name: Build macOS ARM .dmg
+    runs-on: macos-14   # Apple Silicon
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Resolve effective version
+        id: version
+        env:
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$OVERRIDE" ]]; then
+            v="$OVERRIDE"
+          else
+            v=$(awk -F= '$1=="version"{print $2}' gradle.properties)
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build .dmg
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          args=()
+          if [[ -n "$OVERRIDE" ]]; then args+=("-Pversion=$OVERRIDE"); fi
+          if [[ "$CHANNEL" != "stable" ]]; then args+=("-Pchannel=$CHANNEL"); fi
+          # `${arr[@]+...}` form: safe expansion of empty arrays under `set -u` on bash 3.2
+          # (still the system bash on macOS, even though runner PATH usually picks up bash 5.x).
+          ./gradlew ${args[@]+"${args[@]}"} packageDmg createDistributable
+
+      - name: Smoke test built binary
+        run: |
+          set -euo pipefail
+          # macOS runners ship BSD find (no `-quit`); use shell glob instead. Only one .app
+          # bundle is ever produced per build (one per packageName), so candidates[0] is safe.
+          candidates=(build/compose/binaries/main/app/*.app)
+          [[ -d "${candidates[0]}" ]] || { echo "::error::no .app bundle found under build/compose/binaries/main/app/"; exit 1; }
+          app_bin="${candidates[0]}"
+          "$app_bin/Contents/MacOS/$(basename "$app_bin" .app)" --version
+
+      - name: Rename + collect artifact
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          src=$(find build/compose/binaries/main/dmg -name '*.dmg' | head -1)
+          [[ -n "$src" ]] || { echo "::error::no .dmg found"; exit 1; }
+          cp "$src" "out/${PREFIX}-macos-arm64.dmg"
+          ls -la out/
+
+      - name: Upload macOS ARM artifact
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 #v4.4.0
+        with:
+          name: macos-arm
+          path: out/*
+          if-no-files-found: error
+
+  build-macos-intel:
+    name: Build macOS Intel .dmg
+    runs-on: macos-13   # Intel
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Resolve effective version
+        id: version
+        env:
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$OVERRIDE" ]]; then
+            v="$OVERRIDE"
+          else
+            v=$(awk -F= '$1=="version"{print $2}' gradle.properties)
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build .dmg
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          args=()
+          if [[ -n "$OVERRIDE" ]]; then args+=("-Pversion=$OVERRIDE"); fi
+          if [[ "$CHANNEL" != "stable" ]]; then args+=("-Pchannel=$CHANNEL"); fi
+          # `${arr[@]+...}` form: safe expansion of empty arrays under `set -u` on bash 3.2
+          # (still the system bash on macOS, even though runner PATH usually picks up bash 5.x).
+          ./gradlew ${args[@]+"${args[@]}"} packageDmg createDistributable
+
+      - name: Smoke test built binary
+        run: |
+          set -euo pipefail
+          # macOS runners ship BSD find (no `-quit`); use shell glob instead. Only one .app
+          # bundle is ever produced per build (one per packageName), so candidates[0] is safe.
+          candidates=(build/compose/binaries/main/app/*.app)
+          [[ -d "${candidates[0]}" ]] || { echo "::error::no .app bundle found under build/compose/binaries/main/app/"; exit 1; }
+          app_bin="${candidates[0]}"
+          "$app_bin/Contents/MacOS/$(basename "$app_bin" .app)" --version
+
+      - name: Rename + collect artifact
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          src=$(find build/compose/binaries/main/dmg -name '*.dmg' | head -1)
+          [[ -n "$src" ]] || { echo "::error::no .dmg found"; exit 1; }
+          cp "$src" "out/${PREFIX}-macos-x64.dmg"
+          ls -la out/
+
+      - name: Upload macOS Intel artifact
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 #v4.4.0
+        with:
+          name: macos-intel
+          path: out/*
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows .msi
+    runs-on: windows-2022
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Resolve effective version
+        id: version
+        shell: pwsh
+        env:
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:OVERRIDE)) {
+            $v = (Select-String -Path gradle.properties -Pattern '^version=(.*)$').Matches.Groups[1].Value
+          } else {
+            $v = $env:OVERRIDE
+          }
+          "version=$v" | Out-File -Append -Encoding ascii -FilePath $env:GITHUB_OUTPUT
+
+      - name: Build .msi
+        shell: pwsh
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          # NB: don't reuse the name `$args` — that's a PowerShell automatic variable.
+          $gradleArgs = @()
+          if (-not [string]::IsNullOrEmpty($env:OVERRIDE)) { $gradleArgs += "-Pversion=$($env:OVERRIDE)" }
+          if ($env:CHANNEL -ne "stable") { $gradleArgs += "-Pchannel=$($env:CHANNEL)" }
+          .\gradlew.bat @gradleArgs packageMsi createDistributable
+
+      - name: Smoke test built binary
+        shell: pwsh
+        run: |
+          # Filter matches Octi.exe (stable) or any channel-aware variant in nightly.
+          $exe = Get-ChildItem -Recurse -Path build\compose\binaries\main\app -Filter 'Octi*.exe' | Select-Object -First 1
+          if (-not $exe) { Write-Error "no Octi*.exe found"; exit 1 }
+          & $exe.FullName --version
+
+      - name: Rename + collect artifact
+        shell: pwsh
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $src = Get-ChildItem -Path build\compose\binaries\main\msi -Filter *.msi | Select-Object -First 1
+          if (-not $src) { Write-Error "no .msi found"; exit 1 }
+          Copy-Item -Path $src.FullName -Destination "out\$($env:PREFIX).msi"
+          Get-ChildItem out
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 #v4.4.0
+        with:
+          name: windows
+          path: out/*
+          if-no-files-found: error
