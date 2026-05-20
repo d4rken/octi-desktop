@@ -85,17 +85,24 @@ jobs:
         # The desktop's LibsecretKeystore shells out to `secret-tool`, which talks to a Secret
         # Service implementation over D-Bus. On a fresh runner neither is running, so the link
         # step fails with KeystoreFailureRolledBack. Start both, unlock the default collection
-        # with an empty password, and propagate the connection address + control socket via
-        # $GITHUB_ENV so the app launched in a later step inherits them.
+        # with an empty password, and propagate the DBus session address via $GITHUB_ENV so
+        # the app launched in a later step inherits the connection.
         run: |
           set -euo pipefail
           eval "$(dbus-launch --sh-syntax)"
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID" >> "$GITHUB_ENV"
-          # --unlock with empty password creates+unlocks the default collection.
-          # --components=secrets skips ssh/pkcs11 components we don't need.
-          eval "$(printf '\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
-          echo "GNOME_KEYRING_CONTROL=$GNOME_KEYRING_CONTROL" >> "$GITHUB_ENV"
+          # --unlock with an empty password creates+unlocks the default collection.
+          # --components=secrets skips ssh/pkcs11 (we don't need them).
+          # The daemon may print nothing on stdout when only the secrets component is loaded
+          # (the IPC socket — GNOME_KEYRING_CONTROL — isn't needed once libsecret reaches the
+          # daemon over DBus). Capture stdout and re-export only the vars actually set so we
+          # don't trip `set -u` on an empty eval.
+          keyring_env=$(printf '\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets || true)
+          echo "$keyring_env" | grep -E '^[A-Z_]+=' | sed -E 's/^export //; s/;$//' | while IFS= read -r line; do
+            echo "$line" >> "$GITHUB_ENV"
+          done
+          eval "$keyring_env"
           # Smoke test: write + read a value via secret-tool. Fails loudly here if the daemon
           # came up but the DBus connection is broken — easier to debug than a later linking
           # rollback.
