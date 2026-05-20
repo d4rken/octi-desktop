@@ -65,3 +65,55 @@ jobs:
           name: test-results-${{ matrix.os }}
           path: build/reports/tests/test
           if-no-files-found: warn
+
+  smoke:
+    name: Smoke (real sync-server)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Pin sync-server by digest so this test can never silently shift if the tag is republished.
+    # This digest is octi-server v1.1.0 — same image octi-web pins.
+    services:
+      sync-server:
+        image: ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+        ports:
+          - 18080:8080
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Wait for sync-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/v1/status > /dev/null; then
+              echo "sync-server up after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "sync-server did not respond within 30s" >&2
+          docker logs ${{ job.services.sync-server.id }} || true
+          exit 1
+
+      - name: Run smoke suite
+        env:
+          SMOKE_SERVER_URL: http://127.0.0.1:18080
+        run: ./gradlew smokeTest
+
+      - name: Dump sync-server logs on failure
+        if: failure()
+        run: docker logs ${{ job.services.sync-server.id }} || true
+
+      - name: Upload smoke test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: smoke-test-results
+          path: build/reports/tests/smokeTest
+          if-no-files-found: warn

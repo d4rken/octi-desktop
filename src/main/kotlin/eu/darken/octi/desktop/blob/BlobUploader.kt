@@ -211,6 +211,6 @@ class BlobUploader(private val graph: AppGraph) {
     companion object {
         private const val CHUNK_SIZE = 1 * 1024 * 1024 // 1 MiB — server's per-PATCH cap
         private const val MAX_RETRIES_PER_CHUNK = 4
-        private const val HASH_ALGORITHM = "SHA-256"
+        private const val HASH_ALGORITHM = "sha256"
     }
 }

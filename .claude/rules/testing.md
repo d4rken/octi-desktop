@@ -35,11 +35,34 @@ class ExampleTest {
 
 For the debug RPC, tests use `testApplication { ... }` from `ktor-server-test-host` and pass the same `debugRpcModule(...)` function the production server uses. See `DebugRpcServerTest.kt` for the pattern. **Don't** spin up a real `embeddedServer` in tests — bind failures on shared CI runners are painful.
 
+## Smoke suite
+
+`src/smokeTest/kotlin/.../__smoke__/` contains Ubuntu server-smoke tests against a real
+`sync-server` container. They are excluded from `./gradlew check` and run explicitly via:
+
+```bash
+SMOKE_SERVER_URL=http://127.0.0.1:18080 ./gradlew smokeTest
+```
+
+CI runs this in `code-checks.yml` against a pinned `octi-server` v1.1.0 digest. Locally,
+start the server first:
+
+```bash
+docker run --rm -p 18080:8080 ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+```
+
+The smoke suite covers:
+
+- single-device meta module write/read using the real gzip → encrypt wire shape
+- blob session upload → module commit → list → download/decrypt
+- two-device share-code interop for meta + blob reads
+
+If `SMOKE_SERVER_URL` is unset, tests skip cleanly via JUnit assumptions.
+
 ## What's intentionally NOT here (yet)
 
 - Compose UI tests (`runComposeUiTest`) — not wired in this project yet.
-- End-to-end tests against a live `sync-server` container — Phase C work.
-- Cross-platform encryption fixtures (Android encrypts, desktop decrypts) — Phase C work; today's coverage is per-side unit tests only.
+- Cross-platform encryption fixtures (Android encrypts, desktop decrypts) — Phase C work; today's coverage is per-side unit tests plus server smoke.
 
 ## Behavior fixtures vs. enumeration
 

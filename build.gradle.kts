@@ -129,6 +129,29 @@ tasks.test {
     useJUnitPlatform()
 }
 
+val smokeTestSourceSet = sourceSets.create("smokeTest") {
+    compileClasspath += sourceSets["main"].output
+    runtimeClasspath += output + compileClasspath
+}
+
+configurations["smokeTestImplementation"].extendsFrom(configurations["testImplementation"])
+configurations["smokeTestRuntimeOnly"].extendsFrom(configurations["testRuntimeOnly"])
+
+tasks.register<Test>("smokeTest") {
+    description = "Runs E2E smoke tests against a real sync-server. Set SMOKE_SERVER_URL."
+    group = "verification"
+    testClassesDirs = smokeTestSourceSet.output.classesDirs
+    classpath = smokeTestSourceSet.runtimeClasspath
+    useJUnitPlatform()
+
+    val smokeServerUrl = providers.environmentVariable("SMOKE_SERVER_URL").orElse("")
+    inputs.property("smoke.server.url", smokeServerUrl)
+    doFirst {
+        systemProperty("smoke.server.url", smokeServerUrl.get())
+    }
+    outputs.upToDateWhen { false }
+}
+
 // One-shot utility for the screenshot CI workflow. Boots a "phantom phone" peer against a
 // local sync-server, uploads its meta payload, and writes a LinkingData blob the desktop can
 // paste into its Linking screen. Run via `./gradlew bootstrapScreenshotPeer --args="..."` from
