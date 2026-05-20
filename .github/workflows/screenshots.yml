@@ -201,13 +201,40 @@ jobs:
             build/screenshots/captured
           if-no-files-found: warn
 
-      - name: Push branch + open PR via gh CLI
+      - name: Mint d4rken-org-releaser App token
+        # PRs created with the default GITHUB_TOKEN don't trigger downstream workflows
+        # (GitHub's anti-recursion safeguard). So required `pull_request` checks on this
+        # PR — code-checks.yml etc. — never fire and the PR sits forever in "Waiting for
+        # status to be reported". Using an App token instead bypasses that suppression:
+        # events created by an App are treated as external for the purpose of triggering
+        # workflows. The same App + secrets are already used by release-canary.yml and
+        # release-prepare.yml.
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 #v3.1.1
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Resolve bot identity
+        id: bot
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          user_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          echo "user_name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "user_email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Push branch + open PR via gh CLI
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_USER_NAME: ${{ steps.bot.outputs.user_name }}
+          GIT_USER_EMAIL: ${{ steps.bot.outputs.user_email }}
+        run: |
+          set -euo pipefail
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
           gh auth setup-git
 
           BRANCH="screenshots/refresh"
