@@ -132,17 +132,25 @@ class AppGraph private constructor(
         debugActions.registerUiAction(
             DebugActionRegistry.Metadata(
                 name = "navigation.go",
-                description = "Jump directly to a top-level screen. Routes: linking, dashboard, clipboard, settings.",
-                params = mapOf("route" to "one of: linking|dashboard|clipboard|settings"),
+                description = "Jump directly to a screen. Top-level routes: linking, dashboard, clipboard, settings. To open a device's Files screen, pass route=files together with a deviceId.",
+                params = mapOf(
+                    "route" to "one of: linking|dashboard|clipboard|settings|files",
+                    "deviceId" to "string — required when route=files",
+                ),
                 example = """{"route":"settings"}""",
             ),
         ) { params ->
             val route = params["route"]?.jsonPrimitive?.content ?: error("missing route")
-            val screen = when (route) {
+            val screen: Screen = when (route) {
                 "linking" -> Screen.Linking
                 "dashboard" -> Screen.Dashboard
                 "clipboard" -> Screen.Clipboard
                 "settings" -> Screen.Settings
+                "files" -> {
+                    val target = params["deviceId"]?.jsonPrimitive?.content
+                        ?: error("route=files requires deviceId")
+                    Screen.Files(target)
+                }
                 else -> error("unknown route: $route")
             }
             navigator.navigateTo(screen)
@@ -176,6 +184,22 @@ class AppGraph private constructor(
             buildJsonObject {
                 put("result", JsonPrimitive(result::class.simpleName ?: "Unknown"))
             }
+        }
+
+        debugActions.registerUiAction(
+            DebugActionRegistry.Metadata(
+                name = "settings.themeMode",
+                description = "Override the UI theme. Used by the screenshot workflow to capture light + dark variants of the same screen.",
+                params = mapOf("mode" to "one of: SYSTEM|LIGHT|DARK"),
+                example = """{"mode":"DARK"}""",
+            ),
+        ) { params ->
+            val raw = params["mode"]?.jsonPrimitive?.content ?: error("missing mode")
+            val mode = eu.darken.octi.desktop.storage.ThemeMode.entries
+                .firstOrNull { it.name == raw }
+                ?: error("unknown mode: $raw")
+            settings.update { it.copy(themeMode = mode) }
+            buildJsonObject { put("mode", JsonPrimitive(mode.name)) }
         }
     }
 

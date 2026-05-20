@@ -73,9 +73,10 @@ Important: `activeClientPresent == true` means we have credentials and a client 
 
 ```
 dashboard.refresh            — kick the device-list poll loop now
-dashboard.openDevice         — navigate to a device's detail screen (validates deviceId)
-navigation.go                — jump to "linking" | "dashboard" | "clipboard" | "settings"
+navigation.go                — jump to "linking" | "dashboard" | "clipboard" | "settings" | "files" (with deviceId)
 linking.submit               — submit a share code as if pasted on the Linking screen
+account.unlink               — clear credentials locally and return to the Linking screen
+settings.themeMode           — override the theme (SYSTEM | LIGHT | DARK); used by screenshot CI
 ```
 
 Discover at runtime via `GET /dev/actions` — each entry includes `description`, `params`, and `example`.

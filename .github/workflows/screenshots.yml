@@ -1,0 +1,173 @@
+name: Update screenshots
+
+# Manually-triggered workflow that regenerates README screenshots. Boots a real sync-server in
+# a service container, seeds a phantom phone peer, launches the desktop app under Xvfb with the
+# debug RPC enabled, walks through screens, and opens a PR with the captured PNGs.
+#
+# Why a PR (not a direct push)? Screenshot regressions are visual — a maintainer should always
+# eyeball the new images before they replace what's checked in. The PR diff makes that review
+# trivial (GitHub renders before/after).
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_server_digest:
+        description: 'Pin sync-server by digest. Leave blank to use the default-tracked digest.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture & open PR
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    services:
+      sync-server:
+        # Same digest pinning convention used by octi-web's smoke test. Override via input when
+        # targeting a different release; refresh the default deliberately when needed.
+        image: ghcr.io/d4rken-org/octi-server@sha256:bdb7a647a4d74ad39d17170080d9aacc94159f412b147372825c23e7067fa0b7
+        ports:
+          - 18080:8080
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      DISPLAY: ':99'
+      SYNC_SERVER_URL: 'http://127.0.0.1:18080'
+      RPC_PORT: '53123'
+      APP_LOG: ${{ github.workspace }}/build/screenshots/app.log
+      LINK_FILE: ${{ github.workspace }}/build/screenshots/link.txt
+      OUT_DIR: ${{ github.workspace }}/build/screenshots/captured
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Install Xvfb + screenshot tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends xvfb libsecret-tools imagemagick python3
+
+      - name: Wait for sync-server
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -sf "$SYNC_SERVER_URL/v1/status" >/dev/null; then
+              echo "sync-server up after ${attempt}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::sync-server did not respond within 30s" >&2
+          docker logs ${{ job.services.sync-server.id }} || true
+          exit 1
+
+      - name: Start Xvfb
+        run: |
+          set -euo pipefail
+          mkdir -p build/screenshots
+          # Window state is rememberWindowState(1024.dp, 720.dp) → match that exactly. No WM, so
+          # the Compose window opens at (0,0) without decorations.
+          Xvfb :99 -screen 0 1024x720x24 >build/screenshots/xvfb.log 2>&1 &
+          echo $! > build/screenshots/xvfb.pid
+          # Give the X server a moment to bind.
+          for attempt in $(seq 1 10); do
+            if DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then
+              echo "Xvfb up after ${attempt} attempts"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Xvfb did not start" >&2
+          cat build/screenshots/xvfb.log >&2 || true
+          exit 1
+
+      - name: Seed phantom peer
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon bootstrapScreenshotPeer \
+            --args="--server $SYNC_SERVER_URL --label Pixel --output $LINK_FILE"
+
+      - name: Launch desktop app
+        run: |
+          set -euo pipefail
+          # `./gradlew run` spins a daemon and inherits stdio. We want the JVM detached so this
+          # step can return; redirect both streams into APP_LOG and capture the process group so
+          # the cleanup step can take it down.
+          mkdir -p "$(dirname "$APP_LOG")"
+          nohup ./gradlew --no-daemon run \
+            --args="--enable-debug-rpc --debug-rpc-port $RPC_PORT" \
+            >"$APP_LOG" 2>&1 &
+          echo $! > build/screenshots/app.pid
+
+      - name: Capture screenshots
+        run: |
+          set -euo pipefail
+          ./.github/scripts/capture-screenshots.sh
+
+      - name: Copy captured screenshots into the repo
+        run: |
+          set -euo pipefail
+          mkdir -p fastlane/metadata/desktop/screenshots
+          # Overwrite (intentional) — this workflow is the only producer.
+          cp "$OUT_DIR"/*.png fastlane/metadata/desktop/screenshots/
+          ls -la fastlane/metadata/desktop/screenshots
+
+      - name: Stop desktop app
+        if: always()
+        run: |
+          set +e
+          if [[ -f build/screenshots/app.pid ]]; then
+            kill "$(cat build/screenshots/app.pid)" || true
+          fi
+          if [[ -f build/screenshots/xvfb.pid ]]; then
+            kill "$(cat build/screenshots/xvfb.pid)" || true
+          fi
+
+      - name: Upload raw artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: screenshot-debug
+          path: |
+            build/screenshots/app.log
+            build/screenshots/xvfb.log
+            build/screenshots/captured
+          if-no-files-found: warn
+
+      - name: Push branch + open PR via gh CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+          BRANCH="screenshots/refresh"
+          git checkout -b "$BRANCH"
+          git add fastlane/metadata/desktop/screenshots/
+          if git diff --staged --quiet; then
+            echo "No screenshot changes vs. main — nothing to PR."
+            exit 0
+          fi
+          git commit -m "Refresh README screenshots"
+          # Force-push: subsequent runs overwrite the same branch, which updates an open PR in
+          # place rather than spawning a fresh one per run.
+          git push --force --set-upstream origin "$BRANCH"
+
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            echo "PR already open for $BRANCH; pushed an update."
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "Refresh README screenshots" \
+              --body "Automated refresh from the \`Update screenshots\` workflow. Review the diffs and merge if the new shots look right."
+          fi

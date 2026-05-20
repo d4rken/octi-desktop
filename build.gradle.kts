@@ -119,6 +119,22 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// One-shot utility for the screenshot CI workflow. Boots a "phantom phone" peer against a
+// local sync-server, uploads its meta payload, and writes a LinkingData blob the desktop can
+// paste into its Linking screen. Run via `./gradlew bootstrapScreenshotPeer --args="..."` from
+// .github/workflows/screenshots.yml — not used at runtime.
+tasks.register<JavaExec>("bootstrapScreenshotPeer") {
+    group = "screenshots"
+    description = "Seed a phantom peer on a local sync-server for screenshot capture."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("eu.darken.octi.desktop.screenshots.PeerSeeder")
+    javaLauncher.set(
+        javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        },
+    )
+}
+
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(21))
