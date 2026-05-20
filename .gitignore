@@ -5,3 +5,8 @@ build/
 out/
 local.properties
 .DS_Store
+
+# Cross-repo wire-format fixtures fetched from d4rken-org/octi at the SHA
+# pinned in fixture-lock.json. Populated lazily by InteropFixtureSync before
+# the verify tests run. Never edit by hand.
+.cache/interop-fixtures/
