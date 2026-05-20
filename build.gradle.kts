@@ -138,16 +138,20 @@ configurations["smokeTestImplementation"].extendsFrom(configurations["testImplem
 configurations["smokeTestRuntimeOnly"].extendsFrom(configurations["testRuntimeOnly"])
 
 tasks.register<Test>("smokeTest") {
-    description = "Runs E2E smoke tests against a real sync-server. Set SMOKE_SERVER_URL."
+    description = "Runs E2E smoke tests against a real sync-server. Set SMOKE_SERVER_URL " +
+        "(required) and optionally SMOKE_SERVER_URL_B for two-server multi-connector cases."
     group = "verification"
     testClassesDirs = smokeTestSourceSet.output.classesDirs
     classpath = smokeTestSourceSet.runtimeClasspath
     useJUnitPlatform()
 
     val smokeServerUrl = providers.environmentVariable("SMOKE_SERVER_URL").orElse("")
+    val smokeServerUrlB = providers.environmentVariable("SMOKE_SERVER_URL_B").orElse("")
     inputs.property("smoke.server.url", smokeServerUrl)
+    inputs.property("smoke.server.url.b", smokeServerUrlB)
     doFirst {
         systemProperty("smoke.server.url", smokeServerUrl.get())
+        systemProperty("smoke.server.url.b", smokeServerUrlB.get())
     }
     outputs.upToDateWhen { false }
 }

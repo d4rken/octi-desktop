@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.json.JsonObject
@@ -75,14 +76,34 @@ class AppGraph private constructor(
     val activeConnectors: StateFlow<List<OctiServerConnector>> = _activeConnectors.asStateFlow()
 
     /**
-     * Convenience for the common case of "the only OctiServer connector". Today every consumer
-     * reads this; the explicit `firstOrNull` semantics keep the single-vs-many distinction
-     * visible in the type. When the desktop ever surfaces a multi-account UI, consumers move
-     * to [activeConnectors] iteration.
+     * Convenience for the common case of "the only OctiServer connector". Transitional during
+     * the multi-connector rollout — fan-out writers (PR-4) and the multi-source resolver (PR-3)
+     * iterate [activeConnectors] / [runningConnectors] instead. Legitimate remaining usages are
+     * single-account UI surfaces that explicitly want "the first linked connector" semantics.
      */
+    @Deprecated(
+        message = "Transitional during multi-connector rollout; prefer iterating activeConnectors or runningConnectors.",
+    )
     val primaryConnector: StateFlow<OctiServerConnector?> = activeConnectors
         .map { it.firstOrNull() }
         .stateIn(appScope, SharingStarted.Eagerly, initialConnectors.firstOrNull())
+
+    /**
+     * Linked connectors that are NOT paused. Polling loops (DeviceListRepo), websocket sessions
+     * (OctiServerWebSocketClient), and (in PR-4) writers consume this so a paused connector
+     * stops contributing traffic without being unlinked. Settings UI keeps reading the full
+     * [activeConnectors] list so paused entries still render with their "Resume" toggle.
+     */
+    val runningConnectors: StateFlow<List<OctiServerConnector>> =
+        combine(activeConnectors, settings.flow) { connectors, snapshot ->
+            connectors.filterNot { snapshot.connectors[it.identifier.idString]?.paused == true }
+        }.stateIn(
+            scope = appScope,
+            started = SharingStarted.Eagerly,
+            initialValue = initialConnectors.filterNot {
+                settings.data.connectors[it.identifier.idString]?.paused == true
+            },
+        )
 
     /**
      * Created eagerly so its [activeConnectors] collector is wired before any UI subscribes.

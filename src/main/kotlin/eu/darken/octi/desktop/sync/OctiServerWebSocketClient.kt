@@ -104,18 +104,21 @@ class OctiServerWebSocketClient(
     private var lifecycleJobs: MutableMap<ConnectorId, Job> = mutableMapOf()
 
     fun start() {
-        graph.activeConnectors
+        // Observe runningConnectors (active minus paused) so toggling pause cleanly cancels /
+        // restarts the per-connector loop, leaves the paused entry without an open socket, and
+        // doesn't burn reconnect attempts on a connector the user explicitly silenced.
+        graph.runningConnectors
             .onEach { connectors ->
                 lifecycleLock.withLock {
-                    val active = connectors.associateBy { it.identifier }
-                    // Cancel loops for connectors that left the active set.
-                    val removed = lifecycleJobs.keys - active.keys
+                    val running = connectors.associateBy { it.identifier }
+                    // Cancel loops for connectors that left the running set (unlink or pause).
+                    val removed = lifecycleJobs.keys - running.keys
                     for (id in removed) {
                         lifecycleJobs.remove(id)?.cancel()
                         _statesByConnector.update { it - id }
                     }
-                    // Start loops for newly active connectors.
-                    for ((id, connector) in active) {
+                    // Start loops for newly running connectors.
+                    for ((id, connector) in running) {
                         if (id in lifecycleJobs) continue
                         lifecycleJobs[id] = graph.appScope.launch { runLoop(connector) }
                     }
@@ -152,7 +155,7 @@ class OctiServerWebSocketClient(
                 val session = client.openWebSocketSession()
                 consecutiveFailures = 0
                 _statesByConnector.update { it + (id to ConnectionState.Connected) }
-                consume(session)
+                consume(id, session)
                 true
             } catch (e: CancellationException) {
                 throw e
@@ -186,11 +189,11 @@ class OctiServerWebSocketClient(
         }
     }
 
-    private suspend fun consume(session: DefaultClientWebSocketSession) {
+    private suspend fun consume(connectorId: ConnectorId, session: DefaultClientWebSocketSession) {
         try {
             session.incoming.consumeEach { frame ->
                 when (frame) {
-                    is Frame.Text -> handleTextFrame(frame.readText())
+                    is Frame.Text -> handleTextFrame(connectorId, frame.readText())
                     is Frame.Close -> {
                         log(TAG, INFO) {
                             "Server closed WebSocket: ${frame.readReason()?.message ?: "no reason"}"
@@ -205,7 +208,7 @@ class OctiServerWebSocketClient(
         }
     }
 
-    private suspend fun handleTextFrame(text: String) {
+    private suspend fun handleTextFrame(connectorId: ConnectorId, text: String) {
         val payload = try {
             Serialization.json.decodeFromString(EventPayload.serializer(), text)
         } catch (e: Throwable) {
@@ -223,10 +226,10 @@ class OctiServerWebSocketClient(
                         return@forEach
                     }
                     log(TAG, DEBUG) {
-                        "Event: module=${event.moduleId} owner=${event.deviceId.take(8)} " +
+                        "[${connectorId.logLabel}] Event: module=${event.moduleId} owner=${event.deviceId.take(8)} " +
                             "action=${event.action} source=${event.sourceDeviceId.take(8)}"
                     }
-                    eventBus.emit(event)
+                    eventBus.emit(connectorId, event)
                 }
             }
         }

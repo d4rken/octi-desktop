@@ -104,4 +104,60 @@ class SettingsDataTest {
         val decoded = json.decodeFromString(SettingsData.serializer(), encoded)
         decoded shouldBe original
     }
+
+    @Test
+    fun `ConnectorConfig defaults paused to false`() {
+        val connectorId = ConnectorId(
+            type = ConnectorType.OCTISERVER,
+            subtype = "prod.kserver.octi.darken.eu",
+            account = "abc",
+        )
+        ConnectorConfig(connectorId = connectorId).paused shouldBe false
+    }
+
+    @Test
+    fun `legacy ConnectorConfig JSON without paused field decodes to paused=false`() {
+        // Existing installs (and the multi-connector-ready-shapes PR's released format) never
+        // wrote `paused`. The new field must default to false on read so users who linked under
+        // the old format don't suddenly find every connector "paused" after upgrading.
+        val legacy = """
+            {
+              "schemaVersion": 2,
+              "deviceId": "abc",
+              "connectors": {
+                "kserver-host-xyz": {
+                  "connectorId": {
+                    "type": "kserver",
+                    "subtype": "host",
+                    "account": "xyz"
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+        val data = json.decodeFromString(SettingsData.serializer(), legacy)
+        val cfg = data.connectors["kserver-host-xyz"]!!
+        cfg.paused shouldBe false
+    }
+
+    @Test
+    fun `paused=true round-trips`() {
+        val connectorId = ConnectorId(
+            type = ConnectorType.OCTISERVER,
+            subtype = "prod.kserver.octi.darken.eu",
+            account = "abc",
+        )
+        val original = SettingsData(
+            deviceId = "dev",
+            connectors = mapOf(
+                connectorId.idString to ConnectorConfig(connectorId = connectorId, paused = true),
+            ),
+        )
+        val encoded = json.encodeToString(SettingsData.serializer(), original)
+        // encodeDefaults = true → false values also emit; pin both states are explicit on disk.
+        // Note: defaultJson uses prettyPrint=true, so the formatting is `"paused": true`.
+        encoded.contains("\"paused\": true") shouldBe true
+        val decoded = json.decodeFromString(SettingsData.serializer(), encoded)
+        decoded shouldBe original
+    }
 }

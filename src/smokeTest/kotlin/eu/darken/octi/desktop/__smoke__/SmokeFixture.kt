@@ -18,9 +18,25 @@ object SmokeFixture {
         ?.takeIf { it.isNotBlank() }
         ?.removeSuffix("/")
 
+    private val serverUrlB: String? = System.getProperty("smoke.server.url.b")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.removeSuffix("/")
+
     fun assumeServerConfigured() {
         Assumptions.assumeTrue(serverUrl != null) {
             "SMOKE_SERVER_URL is not set — skipping E2E smoke. Set it to e.g. http://127.0.0.1:18080"
+        }
+    }
+
+    /**
+     * Skip the test cleanly if a second sync-server isn't configured. Local devs typically
+     * only run one container; CI's code-checks workflow brings up both.
+     */
+    fun assumeTwoServersConfigured() {
+        assumeServerConfigured()
+        Assumptions.assumeTrue(serverUrlB != null) {
+            "SMOKE_SERVER_URL_B is not set — skipping multi-connector smoke. Set it to e.g. http://127.0.0.1:18081"
         }
     }
 
@@ -65,13 +81,45 @@ object SmokeFixture {
         }
     }
 
+    /**
+     * Stand up one account on each of two sync-server instances, sharing the same desktop
+     * deviceId. Mirrors the runtime case where a single desktop install is linked to two
+     * OctiServer accounts on different servers (e.g. work + personal) — each server sees the
+     * device through its own account view; the desktop merges across both. Skips cleanly when
+     * `SMOKE_SERVER_URL_B` isn't set.
+     */
+    suspend fun <T> withTwoServerAccounts(
+        block: suspend (accountA: SmokeAccount, accountB: SmokeAccount) -> T,
+    ): T {
+        assumeTwoServersConfigured()
+        val sharedDeviceId = DeviceId(UUID.randomUUID().toString())
+        val accountA = newAccount(label = "smoke-server-a", deviceIdOverride = sharedDeviceId, serverUrlOverride = serverUrl)
+        val accountB = try {
+            newAccount(label = "smoke-server-b", deviceIdOverride = sharedDeviceId, serverUrlOverride = serverUrlB)
+        } catch (e: Throwable) {
+            runCatching { accountA.client.deleteAccount() }
+            accountA.close()
+            throw e
+        }
+        return try {
+            block(accountA, accountB)
+        } finally {
+            runCatching { accountB.client.deleteAccount() }
+            accountB.close()
+            runCatching { accountA.client.deleteAccount() }
+            accountA.close()
+        }
+    }
+
     private suspend fun newAccount(
         label: String,
         shareCode: String? = null,
         keyset: PayloadEncryption.KeySet = PayloadEncryption().exportKeyset(),
+        deviceIdOverride: DeviceId? = null,
+        serverUrlOverride: String? = null,
     ): SmokeAccount {
-        val address = OctiServer.Address.tryParse(serverUrl!!).getOrThrow()
-        val deviceId = DeviceId(UUID.randomUUID().toString())
+        val address = OctiServer.Address.tryParse(serverUrlOverride ?: serverUrl!!).getOrThrow()
+        val deviceId = deviceIdOverride ?: DeviceId(UUID.randomUUID().toString())
         val metadata = DeviceMetadata(
             version = "octi-desktop/smoke",
             platform = "desktop-linux",

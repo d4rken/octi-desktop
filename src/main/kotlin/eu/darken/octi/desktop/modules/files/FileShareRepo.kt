@@ -17,6 +17,7 @@ import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.octiserver.dto.ModuleCommitRequest
 import eu.darken.octi.desktop.protocol.octiserver.ws.EventPayload
 import eu.darken.octi.desktop.protocol.serialization.Serialization
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.protocol.sync.RemoteBlobRef
 import eu.darken.octi.desktop.sync.ModuleReader
@@ -60,7 +61,16 @@ class FileShareRepo(private val graph: AppGraph) {
     private val ownDocLock = Mutex()
     private val _ownFiles = MutableStateFlow<FileShareInfo?>(null)
     val ownFiles: StateFlow<FileShareInfo?> = _ownFiles.asStateFlow()
-    private var ownEtag: String? = null
+
+    /**
+     * Per-connector own-document state. Each connector tracks its own server-side ETag because
+     * the FileShareInfo document is a per-server resource — a successful PUT to connector A
+     * doesn't bump connector B's ETag. Today only the primary connector receives commits, so
+     * the map has at most one entry; PR-5's blob fan-out reads its entry per connector.
+     */
+    private val ownDocStateByConnector: MutableMap<ConnectorId, OwnDocState> = mutableMapOf()
+
+    private data class OwnDocState(val etag: String?)
 
     fun start() {
         // Pull our own document on every transition into an active connector + on every WS
@@ -71,10 +81,11 @@ class FileShareRepo(private val graph: AppGraph) {
             .launchIn(graph.appScope)
 
         graph.syncEventBus.events
-            .filter { event ->
-                event is EventPayload.Event.ModuleChanged &&
-                    event.moduleId == ModuleIds.FILES.id &&
-                    event.deviceId == graph.deviceId.id
+            .filter { syncEvent ->
+                val ev = syncEvent.event
+                ev is EventPayload.Event.ModuleChanged &&
+                    ev.moduleId == ModuleIds.FILES.id &&
+                    ev.deviceId == graph.deviceId.id
             }
             .onEach { refreshOwn() }
             .launchIn(graph.appScope)
@@ -216,29 +227,31 @@ class FileShareRepo(private val graph: AppGraph) {
             .distinct()
             .map { ModuleCommitRequest.BlobRef(blobId = it) }
 
+        val connectorId = connector.identifier
+        val currentEtag = ownDocStateByConnector[connectorId]?.etag
+
         client.commitModule(
             moduleId = ModuleIds.FILES,
             request = ModuleCommitRequest(documentBase64 = documentBase64, blobRefs = blobRefs),
-            ifMatch = ownEtag,
-            ifNoneMatch = if (ownEtag == null) "*" else null,
+            ifMatch = currentEtag,
+            ifNoneMatch = if (currentEtag == null) "*" else null,
         )
 
         // We don't get the new ETag back from commitModule — refresh to pick it up so the
         // next commit's If-Match matches the new server state.
-        refreshOwnEtag()
+        refreshOwnEtag(connector)
     }
 
-    private suspend fun refreshOwnEtag() {
-        val client = graph.primaryConnector.value?.client ?: return
+    private suspend fun refreshOwnEtag(connector: OctiServerConnector) {
         try {
-            when (val response = client.readModule(ModuleIds.FILES, graph.deviceId)) {
+            when (val response = connector.client.readModule(ModuleIds.FILES, graph.deviceId)) {
                 is eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient.ModuleReadResult.Ok -> {
-                    ownEtag = response.etag
+                    ownDocStateByConnector[connector.identifier] = OwnDocState(etag = response.etag)
                 }
                 else -> Unit
             }
         } catch (e: Throwable) {
-            log(TAG, WARN, e) { "Failed to refresh own FileShareInfo ETag" }
+            log(TAG, WARN, e) { "Failed to refresh own FileShareInfo ETag for ${connector.identifier.logLabel}" }
         }
     }
 

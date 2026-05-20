@@ -10,6 +10,7 @@ import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.meta.MetaInfo
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.serialization.Serialization
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -45,7 +46,13 @@ private val TAG = logTag("Module", "Meta", "Writer")
  */
 class MetaWriter(private val graph: AppGraph) {
 
-    private var lastWrittenPayload: ByteArray? = null
+    /**
+     * Per-connector cache of the last successfully written plaintext payload. Used to skip
+     * no-op writes (compare-and-set against this connector's last-written bytes). Today only
+     * primary writes — PR-4's fan-out reads its entry per connector. Stale entries on unlink
+     * are harmless (handler is gone) and pruned lazily as PR-4 lands.
+     */
+    private val lastWrittenPayloadByConnector: MutableMap<ConnectorId, ByteArray> = mutableMapOf()
 
     private val _lastWriteSuccessAt = MutableStateFlow<Instant?>(null)
 
@@ -71,7 +78,8 @@ class MetaWriter(private val graph: AppGraph) {
         graph.primaryConnector
             .flatMapLatest<OctiServerConnector?, Unit> { connector ->
                 if (connector == null) {
-                    lastWrittenPayload = null
+                    // No active primary — drop the cache so a future relink writes fresh bytes.
+                    lastWrittenPayloadByConnector.clear()
                     flowOf(Unit)
                 } else {
                     writeLoop(connector)
@@ -83,14 +91,16 @@ class MetaWriter(private val graph: AppGraph) {
     private fun writeLoop(connector: OctiServerConnector): Flow<Unit> = flow {
         val client = connector.client
         val credentials = connector.credentials
+        val connectorId = connector.identifier
         val crypto = PayloadEncryption(keySet = credentials.encryptionKeyset)
         while (true) {
             try {
                 val info = buildMetaInfo()
                 val plaintext = Serialization.json.encodeToString(MetaInfo.serializer(), info)
                     .toByteArray(Charsets.UTF_8)
-                if (plaintext.contentEquals(lastWrittenPayload)) {
-                    log(TAG, DEBUG) { "Meta payload unchanged since last write; skipping" }
+                val lastWritten = lastWrittenPayloadByConnector[connectorId]
+                if (plaintext.contentEquals(lastWritten)) {
+                    log(TAG, DEBUG) { "Meta payload unchanged for ${connectorId.logLabel}; skipping" }
                 } else {
                     // Android wire format: gzip BEFORE encrypt, AAD = "${deviceId}:${moduleId}".
                     // See ModuleReader.buildAad for the rationale.
@@ -98,13 +108,15 @@ class MetaWriter(private val graph: AppGraph) {
                     val gzipped = plaintext.toByteString().toGzip()
                     val ciphertext = crypto.encrypt(gzipped, aad).toByteArray()
                     client.writeModule(ModuleIds.META, ciphertext)
-                    lastWrittenPayload = plaintext
+                    lastWrittenPayloadByConnector[connectorId] = plaintext
                     _lastWriteSuccessAt.value = Clock.System.now()
                     _lastWrittenInfo.value = info
-                    log(TAG, DEBUG) { "Meta payload written (${plaintext.size}B plaintext, ${ciphertext.size}B ciphertext)" }
+                    log(TAG, DEBUG) {
+                        "Meta payload written to ${connectorId.logLabel} (${plaintext.size}B plaintext, ${ciphertext.size}B ciphertext)"
+                    }
                 }
             } catch (e: Throwable) {
-                log(TAG, WARN, e) { "Meta write failed; will retry on next tick" }
+                log(TAG, WARN, e) { "Meta write to ${connectorId.logLabel} failed; will retry on next tick" }
             }
             emit(Unit)
             delay(WRITE_INTERVAL.inWholeMilliseconds)

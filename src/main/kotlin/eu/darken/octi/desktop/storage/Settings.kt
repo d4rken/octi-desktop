@@ -179,10 +179,16 @@ data class SettingsData(
  * [connectorId] is stored alongside the map key (which is [ConnectorId.idString]) so consumers
  * never have to parse the idString — its `-` separator collides with hyphens inside hostnames
  * and UUIDs. Future per-connector knobs (e.g. polling intervals, mute flags) land here.
+ *
+ * [paused] gates ALL sync work for this connector (device list polling, websocket, meta /
+ * clipboard writes, file share refresh). Mirrors Android's `SyncSettings.pausedConnectorIds`.
+ * Default false; a pause toggle in Settings flips it. While paused, the connector still appears
+ * in the Settings list (so the user can re-enable or unlink) but contributes no traffic.
  */
 @Serializable
 data class ConnectorConfig(
     val connectorId: ConnectorId,
+    val paused: Boolean = false,
 )
 
 @Serializable

@@ -124,7 +124,8 @@ class DashboardModuleRepo(
             // Central WS event dispatcher.
             launch {
                 graph.syncEventBus.events
-                    .onEach { event ->
+                    .onEach { syncEvent ->
+                        val event = syncEvent.event
                         if (event is EventPayload.Event.ModuleChanged) {
                             slices[Key(DeviceId(event.deviceId), ModuleId(event.moduleId))]?.kick()
                         }

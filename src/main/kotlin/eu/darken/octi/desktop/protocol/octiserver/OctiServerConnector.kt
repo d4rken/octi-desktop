@@ -3,6 +3,7 @@ package eu.darken.octi.desktop.protocol.octiserver
 import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.ConnectorType
 import eu.darken.octi.desktop.protocol.sync.DeviceId
+import eu.darken.octi.desktop.protocol.sync.SyncConnector
 
 /**
  * Cohesive bundle of everything a consumer needs to talk to one OctiServer account: the
@@ -22,10 +23,14 @@ import eu.darken.octi.desktop.protocol.sync.DeviceId
  * lifecycle the old `activeClient.close()` had.
  */
 class OctiServerConnector(
-    val identifier: ConnectorId,
+    override val identifier: ConnectorId,
     val credentials: OctiServer.Credentials,
     val client: OctiServerHttpClient,
-) : AutoCloseable {
+) : SyncConnector {
+
+    /** OctiServer has no email/username — surface the server address so the Settings card has a recognizable line. */
+    override val accountLabel: String?
+        get() = credentials.serverAdress.address
 
     override fun close() {
         client.close()

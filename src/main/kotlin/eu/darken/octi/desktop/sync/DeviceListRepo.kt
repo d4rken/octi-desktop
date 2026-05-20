@@ -7,17 +7,19 @@ import eu.darken.octi.desktop.di.AppGraph
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.octiserver.dto.DevicesResponse
 import eu.darken.octi.desktop.protocol.sync.ConnectorId
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withTimeoutOrNull
@@ -27,17 +29,18 @@ private val TAG = logTag("Sync", "DeviceListRepo")
 
 /**
  * Source of truth for "which devices are in this account?". Polls `/v1/devices` against every
- * connector in [AppGraph.activeConnectors] while they're active, falls back to the on-disk
+ * non-paused connector in [AppGraph.runningConnectors] concurrently, falls back to the on-disk
  * cache on cold start, and tolerates transient fetch failures per connector (keeps emitting
  * the last-known list rather than erroring out the UI).
  *
- * Per-connector polling loops are torn down via `flatMapLatest` whenever the set of active
- * connectors changes — no leaked coroutines, no requests against a closed
- * [OctiServerConnector].
+ * Per-connector polling loops are torn down via `flatMapLatest` whenever the set of running
+ * connectors changes (link/unlink/pause toggle) — no leaked coroutines, no requests against a
+ * closed [OctiServerConnector]. [kick] is a broadcast: a single refresh wakes every active
+ * loop, not just one.
  *
- * Today the active-connector set is always 0-or-1, but the merge step and the per-connector
- * state maps are real: when GDrive lands, [mergedDevices] keeps surfacing the same flat list
- * to the UI while the underlying per-connector loops fan out.
+ * Paused connectors don't poll, but their last-known devices stay visible in [mergedDevices]
+ * so the dashboard doesn't blank out when the user pauses — only [activeConnectors] going
+ * fully empty (unlink of every connector) prunes the state.
  */
 class DeviceListRepo(
     private val graph: AppGraph,
@@ -62,32 +65,29 @@ class DeviceListRepo(
     private val _perConnector = MutableStateFlow<Map<String, List<DevicesResponse.Device>>>(emptyMap())
 
     /**
-     * Wakes the polling loop early. `CONFLATED` capacity means a burst of N kicks within one
-     * poll window collapses to a single refresh — the server's 500ms debounce already groups
-     * related events, so further collapsing on the client side is correct, not lossy.
+     * Broadcast refresh signal. Every active poll loop subscribes via `kickFlow.first()`, so a
+     * single [kick] wakes all connectors. `extraBufferCapacity = 16` is generous — bursts of
+     * kicks within one poll window are debounced naturally by the loops sleeping on `first()`,
+     * and the buffer ensures `tryEmit` never drops a kick under load.
      */
-    private val kickChannel = Channel<Unit>(Channel.CONFLATED)
+    private val kickFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
 
-    /** Manually request an immediate refresh (UI refresh button, post-link warm-up, …). */
+    /** Manually request an immediate refresh on every active poll loop. */
     fun kick() {
-        kickChannel.trySend(Unit)
+        kickFlow.tryEmit(Unit)
     }
 
+    /**
+     * Per-connector slice emitter. Switches connector set via `flatMapLatest` (a new link or
+     * unlink restarts the merged stream) and uses [merge] inside so all N loops run
+     * concurrently. Emits `(idString → devices)` deltas; the collector below folds them into
+     * [_perConnector].
+     */
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val perConnectorPipe: Flow<Map<String, List<DevicesResponse.Device>>> =
-        graph.activeConnectors.flatMapLatest { connectors ->
-            // Reset per-connector state when the connector set changes so old entries don't
-            // linger. The startup cache seed (in init {}) populates the same shape; this flow
-            // overrides it on first emission.
-            if (connectors.isEmpty()) {
-                _loadStateByConnector.value = emptyMap()
-                flowOf(emptyMap())
-            } else {
-                // Single-connector today: run one poll loop and emit its slice. Multi-connector
-                // tomorrow: combine N poll loops via combine{} — for now we serialize the loops
-                // since active.size is always 1.
-                pollLoopForConnector(connectors.first())
-            }
+    private val perConnectorPipe: Flow<Pair<String, List<DevicesResponse.Device>>> =
+        graph.runningConnectors.flatMapLatest { connectors ->
+            if (connectors.isEmpty()) emptyFlow()
+            else merge(*connectors.map { pollLoopForConnector(it) }.toTypedArray())
         }
 
     /**
@@ -156,15 +156,29 @@ class DeviceListRepo(
         val seeded = cache.load(knownConnectorIds = graph.settings.data.connectors.keys)
         _perConnector.value = seeded
 
-        // Drive the per-connector slice into the published state.
+        // Drive per-connector slices into the published state. Each emission is a single
+        // connector's update; we fold via `update { it + delta }` so concurrent emissions
+        // from N loops don't clobber each other.
         perConnectorPipe
-            .onEach { _perConnector.value = it }
+            .onEach { (key, devices) ->
+                val updated = _perConnector.value + (key to devices)
+                _perConnector.value = updated
+                cache.saveAll(updated)
+            }
             .launchIn(graph.appScope)
 
-        // Side effect: when the connector set becomes empty (unlink), wipe the cache so a
-        // future link with a different account doesn't show ghost devices.
+        // Prune state for connectors that left activeConnectors entirely (unlink). Note: paused
+        // connectors stay in activeConnectors, so their cached devices remain visible — only a
+        // full unlink prunes. Empty list also wipes the persisted cache so a future link with a
+        // different account doesn't show ghost devices.
         graph.activeConnectors
-            .onEach { if (it.isEmpty()) cache.clear() }
+            .onEach { connectors ->
+                val activeKeys = connectors.map { it.identifier.idString }.toSet()
+                val activeIds = connectors.map { it.identifier }.toSet()
+                _perConnector.value = _perConnector.value.filterKeys { it in activeKeys }
+                _loadStateByConnector.value = _loadStateByConnector.value.filterKeys { it in activeIds }
+                if (connectors.isEmpty()) cache.clear()
+            }
             .launchIn(graph.appScope)
 
         // WS-driven freshness: any incoming sync event means at least one peer wrote a module,
@@ -177,27 +191,24 @@ class DeviceListRepo(
 
     private fun pollLoopForConnector(
         connector: OctiServerConnector,
-    ): Flow<Map<String, List<DevicesResponse.Device>>> = flow {
+    ): Flow<Pair<String, List<DevicesResponse.Device>>> = flow {
         val id = connector.identifier
         val key = id.idString
         while (true) {
             _loadStateByConnector.update { it + (id to LoadState.Loading) }
             try {
                 val response = connector.client.getDeviceList()
-                // Persist the updated map BEFORE emitting so the cache and the flow agree.
-                val nextPerConnector = _perConnector.value + (key to response.devices)
-                cache.saveAll(nextPerConnector)
                 _loadStateByConnector.update { it + (id to LoadState.Ok) }
-                emit(nextPerConnector)
+                emit(key to response.devices)
             } catch (e: Throwable) {
                 log(TAG, Logging.Priority.WARN, e) { "getDeviceList for ${id.idString} failed; keeping last value" }
                 _loadStateByConnector.update {
                     it + (id to LoadState.Error(e.message ?: e.javaClass.simpleName))
                 }
             }
-            // withTimeoutOrNull returns null on timeout (natural poll tick) and Unit on a kick.
-            // Either way we restart the loop body and refetch.
-            withTimeoutOrNull(pollIntervalSeconds.seconds) { kickChannel.receive() }
+            // Sleep until either the poll interval expires or `kick()` is called. `first()` on
+            // the broadcast SharedFlow wakes all per-connector loops simultaneously.
+            withTimeoutOrNull(pollIntervalSeconds.seconds) { kickFlow.first() }
         }
     }
 

@@ -12,6 +12,7 @@ import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.clipboard.ClipboardInfo
 import eu.darken.octi.desktop.protocol.octiserver.ws.EventPayload
 import eu.darken.octi.desktop.protocol.serialization.Serialization
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.sync.ModuleReader
 import kotlinx.coroutines.delay
@@ -80,7 +81,22 @@ class ClipboardSync(private val graph: AppGraph) {
         }
     }
 
-    private var lastPushedHash: ByteString? = null
+    /**
+     * Per-connector "what hash we last pushed to that connector" cache. Today only the primary
+     * connector receives writes, so this map has at most one entry; PR-4's fan-out reads its
+     * entry per connector. [bootSnapshotHash] captures the at-boot clipboard so a fresh link
+     * doesn't immediately push pre-existing user data — applied uniformly to every connector's
+     * cache on first contact.
+     */
+    private val lastPushedHashByConnector: MutableMap<ConnectorId, ByteString> = mutableMapOf()
+
+    /**
+     * Clipboard hash captured at start(), used as the "pre-link content" baseline so we don't
+     * push existing user data the moment a connector is linked. Each per-connector cache
+     * starts at this value on first push attempt for that connector.
+     */
+    private var bootSnapshotHash: ByteString? = null
+
     private var lastAppliedHash: ByteString? = null
 
     fun start() {
@@ -89,7 +105,7 @@ class ClipboardSync(private val graph: AppGraph) {
         // On boot, snapshot the current clipboard hash so we don't immediately push existing
         // user data (the user opted in to *sync*, not "upload everything sitting in my
         // clipboard right now").
-        readLocalClipboardOrNull()?.let { (_, hash) -> lastPushedHash = hash }
+        readLocalClipboardOrNull()?.let { (_, hash) -> bootSnapshotHash = hash }
 
         // Outbound poll loop.
         graph.appScope.launch {
@@ -105,11 +121,12 @@ class ClipboardSync(private val graph: AppGraph) {
         // Inbound: react to ModuleChanged for the clipboard module. Self-events are already
         // filtered by the WebSocket client; we still don't need to guard against own deviceId.
         graph.syncEventBus.events
-            .filter { event ->
-                event is EventPayload.Event.ModuleChanged && event.moduleId == ModuleIds.CLIPBOARD.id
+            .filter { syncEvent ->
+                val ev = syncEvent.event
+                ev is EventPayload.Event.ModuleChanged && ev.moduleId == ModuleIds.CLIPBOARD.id
             }
-            .onEach { event ->
-                runCatching { tryPullPeerClipboard(event as EventPayload.Event.ModuleChanged) }
+            .onEach { syncEvent ->
+                runCatching { tryPullPeerClipboard(syncEvent.event as EventPayload.Event.ModuleChanged) }
                     .onFailure { log(TAG, WARN, it) { "Inbound clipboard pull failed" } }
             }
             .launchIn(graph.appScope)
@@ -121,11 +138,15 @@ class ClipboardSync(private val graph: AppGraph) {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size > ClipboardInfo.MAX_BYTES) return
 
-        // Echo suppression: don't push something we just pushed, AND don't push something a
-        // peer just sent us (which we applied locally moments ago).
-        if (hash == lastPushedHash || hash == lastAppliedHash) return
-
         val connector = graph.primaryConnector.value ?: return
+        val connectorId = connector.identifier
+
+        // Echo suppression: don't push something we just pushed to THIS connector, don't push
+        // something a peer sent us (already applied locally), and don't push pre-existing
+        // clipboard content the user had before linking.
+        val lastPushedForThisConnector = lastPushedHashByConnector[connectorId] ?: bootSnapshotHash
+        if (hash == lastPushedForThisConnector || hash == lastAppliedHash) return
+
         val client = connector.client
         val crypto = PayloadEncryption(keySet = connector.credentials.encryptionKeyset)
         val info = ClipboardInfo(type = ClipboardInfo.Type.SIMPLE_TEXT, data = bytes.toByteString())
@@ -135,9 +156,9 @@ class ClipboardSync(private val graph: AppGraph) {
         val aad = "${graph.deviceId.id}:${ModuleIds.CLIPBOARD.id}".toByteArray(Charsets.UTF_8)
         val ciphertext = crypto.encrypt(plaintext.toByteString().toGzip(), aad).toByteArray()
         client.writeModule(ModuleIds.CLIPBOARD, ciphertext)
-        lastPushedHash = hash
+        lastPushedHashByConnector[connectorId] = hash
         _lastPushedInfo.value = info
-        log(TAG, DEBUG) { "Pushed clipboard payload (${bytes.size}B) to server" }
+        log(TAG, DEBUG) { "Pushed clipboard payload (${bytes.size}B) to ${connectorId.logLabel}" }
     }
 
     private suspend fun tryPullPeerClipboard(event: EventPayload.Event.ModuleChanged) {
