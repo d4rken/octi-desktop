@@ -7,9 +7,12 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * Windows DPAPI via JNA Crypt32. Ciphertext blobs are stored under `%APPDATA%\octi\secrets\` —
- * one file per key. DPAPI binds the encryption to the current user account, so the file is
- * unreadable when copied off-machine or accessed by another user.
+ * Windows DPAPI via JNA Crypt32. Ciphertext blobs are stored under
+ * `%APPDATA%\<channel-app-name>\secrets\` (stable → `octi`, canary → `octi-canary`) — one file
+ * per key. The channel-aware directory comes from [PlatformDetector.configDir], which sources
+ * the leaf from [eu.darken.octi.desktop.platform.DesktopIdentity]. DPAPI binds the encryption to
+ * the current user account, so the file is unreadable when copied off-machine or accessed by
+ * another user.
  *
  * The "stored on disk" aspect is fine here because DPAPI is the on-disk-secrets primitive on
  * Windows — no separate keyring daemon required.

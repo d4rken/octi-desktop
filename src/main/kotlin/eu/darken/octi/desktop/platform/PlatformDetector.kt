@@ -5,7 +5,8 @@ import java.nio.file.Paths
 
 /**
  * Identifies the host operating system and resolves canonical config / data directories per
- * platform conventions.
+ * platform conventions. The directory leaf is channel-aware — stable uses `octi`, canary uses
+ * `octi-canary` — so the two channels never share on-disk state. See [DesktopIdentity].
  */
 object PlatformDetector {
 
@@ -23,12 +24,12 @@ object PlatformDetector {
 
     /**
      * Returns the canonical config directory for the app. Persistent user-editable settings live
-     * here. Per platform conventions:
-     * - Linux: `$XDG_CONFIG_HOME/octi` (defaults to `~/.config/octi`)
-     * - macOS: `~/Library/Application Support/octi`
-     * - Windows: `%APPDATA%\octi`
+     * here. Per platform conventions (leaf shown for stable; canary uses `octi-canary`):
+     * - Linux: `$XDG_CONFIG_HOME/<appName>` (defaults to `~/.config/<appName>`)
+     * - macOS: `~/Library/Application Support/<appName>`
+     * - Windows: `%APPDATA%\<appName>`
      */
-    fun configDir(appName: String = "octi"): Path = when (current) {
+    fun configDir(appName: String = DesktopIdentity.current.appName): Path = when (current) {
         Os.LINUX -> {
             val xdg = System.getenv("XDG_CONFIG_HOME")?.takeUnless { it.isBlank() }
             if (xdg != null) Paths.get(xdg, appName)
@@ -44,12 +45,13 @@ object PlatformDetector {
     }
 
     /**
-     * Persistent app-managed data (caches, downloaded blobs, sync state).
-     * - Linux: `$XDG_DATA_HOME/octi`
-     * - macOS: `~/Library/Application Support/octi/data`
-     * - Windows: `%LOCALAPPDATA%\octi\data`
+     * Persistent app-managed data (caches, downloaded blobs, sync state). Same channel-aware
+     * naming as [configDir].
+     * - Linux: `$XDG_DATA_HOME/<appName>`
+     * - macOS: `~/Library/Application Support/<appName>/data`
+     * - Windows: `%LOCALAPPDATA%\<appName>\data`
      */
-    fun dataDir(appName: String = "octi"): Path = when (current) {
+    fun dataDir(appName: String = DesktopIdentity.current.appName): Path = when (current) {
         Os.LINUX -> {
             val xdg = System.getenv("XDG_DATA_HOME")?.takeUnless { it.isBlank() }
             if (xdg != null) Paths.get(xdg, appName)

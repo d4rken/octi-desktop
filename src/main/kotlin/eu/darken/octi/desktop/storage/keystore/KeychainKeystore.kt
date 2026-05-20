@@ -1,5 +1,6 @@
 package eu.darken.octi.desktop.storage.keystore
 
+import eu.darken.octi.desktop.platform.DesktopIdentity
 import java.util.Base64
 
 /**
@@ -7,10 +8,12 @@ import java.util.Base64
  * and Keychain prompts users with a recognizable system dialog when an item is touched.
  *
  * Values are base64-encoded to keep `security`'s -w (password) argument ASCII-safe. The service
- * label is fixed; account becomes the key name so different accounts get distinct items.
+ * label is channel-aware via [DesktopIdentity] so canary and stable show up as distinct items
+ * in Keychain Access; account becomes the key name so different keys within the same channel
+ * get distinct items.
  */
 internal class KeychainKeystore(
-    private val serviceLabel: String = "eu.darken.octi.desktop",
+    private val serviceLabel: String = DesktopIdentity.current.keystoreServiceLabel,
 ) : Keystore {
 
     override val backendDescription: String = "macOS Keychain"

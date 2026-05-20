@@ -1,10 +1,14 @@
 package eu.darken.octi.desktop.storage.keystore
 
+import eu.darken.octi.desktop.platform.DesktopIdentity
 import java.util.Base64
 
 /**
  * Linux libsecret via the `secret-tool` CLI. We pipe the value to stdin so it doesn't appear in
  * the process argument list.
+ *
+ * The `service` attribute is channel-aware via [DesktopIdentity] so canary and stable entries
+ * appear as distinct products in Seahorse / GNOME Keyring tools and can't collide on lookup.
  *
  * Requires the `secret-tool` binary on PATH (Debian/Ubuntu package: `libsecret-tools`,
  * Fedora/RHEL: `libsecret`). If the binary is missing or the Secret Service D-Bus daemon is
@@ -12,7 +16,7 @@ import java.util.Base64
  * [PassphraseFallbackKeystore].
  */
 internal class LibsecretKeystore(
-    private val serviceLabel: String = "eu.darken.octi.desktop",
+    private val serviceLabel: String = DesktopIdentity.current.keystoreServiceLabel,
 ) : Keystore {
 
     override val backendDescription: String = "Linux libsecret (Secret Service)"

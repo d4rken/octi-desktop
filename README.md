@@ -70,13 +70,7 @@ Requires JDK 21 (the Gradle toolchain provisions it automatically; system Java j
 2. On the desktop, paste the code into the welcome screen
 3. Your devices appear in the dashboard within a few seconds
 
-## Where it stores data
-
-| OS | Path |
-|---|---|
-| Linux | `$XDG_CONFIG_HOME/octi` (config + encrypted credentials), `$XDG_DATA_HOME/octi` (caches) |
-| macOS | `~/Library/Application Support/octi/` |
-| Windows | `%APPDATA%\octi\` and `%LOCALAPPDATA%\octi\` |
+## Credential storage
 
 Credentials are stored in the OS keystore (libsecret / Keychain / DPAPI). If the keystore is unavailable (e.g. headless Linux without D-Bus), an Argon2id-derived passphrase fallback kicks in and prompts on every launch.
 
