@@ -123,37 +123,58 @@ jobs:
         env:
           V: ${{ steps.version.outputs.version }}
           PREFIX: ${{ inputs.artifact-prefix }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           # Compose Desktop's packageAppImage outputs to build/compose/binaries/main/app/<packageName>/.
-          # The packageName depends on the build channel (Octi vs OctiNightly), so glob it.
+          # packageName is channel-aware (Octi vs OctiNightly), and jpackage names bin/<name> and
+          # lib/<name>.png after it — glob instead of hardcoding so both channels Just Work.
           APPDIR=/tmp/Octi.AppDir
           rm -rf "$APPDIR"
           src_dir=$(find build/compose/binaries/main/app -mindepth 1 -maxdepth 1 -type d -print -quit)
           [[ -n "$src_dir" ]] || { echo "::error::no app image directory found under build/compose/binaries/main/app"; exit 1; }
           cp -r "$src_dir" "$APPDIR"
-          # Minimal AppRun + .desktop + icon — required by appimagetool.
+          # Launcher binary's basename matches jpackage's --name (= top-level packageName).
+          launcher_bin=$(find "$APPDIR/bin" -maxdepth 1 -type f -print -quit)
+          [[ -n "$launcher_bin" ]] || { echo "::error::no launcher binary found under $APPDIR/bin/"; exit 1; }
+          launcher_name=$(basename "$launcher_bin")
+          # Channel-aware identity: distinct desktop/icon ids so stable + nightly coexist in the
+          # user's desktop icon cache instead of clobbering each other on integration.
+          if [[ "$CHANNEL" == "nightly" ]]; then
+            display_name="Octi Nightly"
+            app_id="octi-nightly"
+          else
+            display_name="Octi"
+            app_id="octi"
+          fi
+          # Quoted heredoc preserves $HERE/$0/$@ literal; sed substitutes the channel-aware launcher.
           cat > "$APPDIR/AppRun" <<'APPRUN'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
-          exec "$HERE/bin/Octi" "$@"
+          exec "$HERE/bin/__LAUNCHER__" "$@"
           APPRUN
+          sed -i "s/__LAUNCHER__/$launcher_name/" "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
-          cat > "$APPDIR/octi.desktop" <<'DESKTOP'
+          cat > "$APPDIR/${app_id}.desktop" <<DESKTOP
           [Desktop Entry]
           Type=Application
-          Name=Octi
+          Name=$display_name
           Exec=AppRun
-          Icon=octi
+          Icon=$app_id
           Categories=Network;
           Terminal=false
           DESKTOP
-          # Octi.png is optional; fall back to a 1x1 transparent PNG if the bundle has none.
-          if [ -f "$APPDIR/lib/Octi.png" ]; then
-            cp "$APPDIR/lib/Octi.png" "$APPDIR/octi.png"
-          else
-            printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82' > "$APPDIR/octi.png"
-          fi
+          # jpackage places the icon at lib/<packageName>.png — glob since packageName is
+          # channel-aware. The previous fallback (1x1 transparent PNG via printf) produced an
+          # AppImage whose .DirIcon couldn't be loaded by downstream tools (appimagelauncherd's
+          # resizer errored with "Unable to load image"); fail loudly instead.
+          icon_src=$(find "$APPDIR/lib" -maxdepth 1 -name '*.png' -type f -print -quit)
+          [[ -n "$icon_src" ]] || { echo "::error::no PNG icon found under $APPDIR/lib/"; exit 1; }
+          cp "$icon_src" "$APPDIR/${app_id}.png"
+          # Hicolor: appimagelauncherd's preferred integration path. Without this it warns
+          # "No icons found at usr/share/icons" and falls back to .DirIcon (lower quality).
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+          cp "$icon_src" "$APPDIR/usr/share/icons/hicolor/256x256/apps/${app_id}.png"
           ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run "$APPDIR" "${PREFIX}-linux-x86_64.AppImage"
 
       - name: Build portable tarball
