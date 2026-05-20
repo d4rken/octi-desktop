@@ -8,6 +8,7 @@ import eu.darken.octi.desktop.debug.rpc.DebugActionRegistry
 import eu.darken.octi.desktop.linking.CredentialsStore
 import eu.darken.octi.desktop.linking.LinkController
 import eu.darken.octi.desktop.linking.LinkResult
+import eu.darken.octi.desktop.linking.UnlinkResult
 import eu.darken.octi.desktop.modules.clipboard.ClipboardSync
 import eu.darken.octi.desktop.modules.files.FileShareRepo
 import eu.darken.octi.desktop.modules.meta.DeviceMetadataProvider
@@ -167,20 +168,56 @@ class AppGraph private constructor(
         debugActions.registerUiAction(
             DebugActionRegistry.Metadata(
                 name = "account.unlink",
-                description = "Local unlink: clears credentials and returns to the Linking screen. Does NOT call the server's DELETE /v1/devices.",
+                description = "Unlink: calls DELETE /v1/devices/{self} then clears local credentials. " +
+                    "Returns the UnlinkResult variant name so callers can branch on Success / NetworkError.",
             ),
         ) {
-            unlink()
-            buildJsonObject { put("unlinked", JsonPrimitive(true)) }
+            val result = unlink()
+            buildJsonObject {
+                put("result", JsonPrimitive(result::class.simpleName ?: "Unknown"))
+            }
         }
     }
 
-    /** Tear down the active session locally — does NOT call the server's DELETE /v1/devices. */
-    fun unlink() {
-        _activeClient.value?.close()
+    /**
+     * Tear down the active session. The server call and local cleanup are isolated so a local
+     * mishap after a confirmed server delete (file lock, navigator state, etc.) does not get
+     * reported as a network failure — `deleteDevice()` succeeding is the commit point. If the
+     * server call itself fails we keep local state untouched and surface
+     * [UnlinkResult.NetworkError] so the user can retry. Returns [UnlinkResult.NotLinked] when
+     * nothing is linked.
+     */
+    suspend fun unlink(): UnlinkResult {
+        val active = _activeClient.value ?: return UnlinkResult.NotLinked
+        try {
+            active.deleteDevice(deviceId)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            log(TAG, Logging.Priority.WARN, cause) { "Unlink server call failed; keeping local credentials" }
+            return UnlinkResult.NetworkError(cause)
+        }
+        // Past this point the server already removed the device. Closing the client and the
+        // navigation step are best-effort — they don't affect on-disk durability — but
+        // credentialsStore.clear() is the durable local-unlink commit: if it fails, the next
+        // app launch will reload stale credentials and try to talk to a deleted server-side
+        // device. Surface that distinctly via LocalCleanupFailed so the UI can warn loudly.
+        log(TAG, Logging.Priority.INFO) { "Server DELETE /v1/devices/{self} succeeded; clearing local state" }
+        runCatching { active.close() }
+            .onFailure { log(TAG, Logging.Priority.WARN, it) { "Client close failed after successful unlink" } }
         _activeClient.value = null
-        credentialsStore.clear()
-        navigator.navigateTo(Screen.Linking, clearStack = true)
+        val clearOutcome = runCatching { credentialsStore.clear() }
+        clearOutcome.onFailure { cause ->
+            log(TAG, Logging.Priority.ERROR, cause) {
+                "Credentials clear FAILED after successful server delete — local state is now stale"
+            }
+        }
+        runCatching { navigator.navigateTo(Screen.Linking, clearStack = true) }
+            .onFailure { log(TAG, Logging.Priority.WARN, it) { "Navigation to Linking failed after successful unlink" } }
+        return clearOutcome.fold(
+            onSuccess = { UnlinkResult.Success },
+            onFailure = { UnlinkResult.LocalCleanupFailed(it) },
+        )
     }
 
     private fun buildClient(credentials: OctiServer.Credentials): OctiServerHttpClient {
@@ -211,9 +248,13 @@ class AppGraph private constructor(
                 ?: error("Settings.load() must have minted a deviceId on first launch")
             val deviceId = DeviceId(storedDeviceId)
 
-            val deviceMetadata = DeviceMetadataProvider.current(userLabel = settings.data.deviceLabel)
             val linkController = LinkController(
-                deviceMetadata = deviceMetadata,
+                // Rebuild on every link/create attempt — user may have edited the device label
+                // on the Linking screen between attempts. Reading from `settings.data` here gives
+                // the current snapshot at submit time, not a frozen snapshot from app start.
+                deviceMetadataProvider = {
+                    DeviceMetadataProvider.current(userLabel = settings.data.deviceLabel)
+                },
                 credentialsStore = credentialsStore,
             )
 

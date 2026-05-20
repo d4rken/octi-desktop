@@ -42,16 +42,25 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import eu.darken.octi.desktop.di.AppGraph
+import eu.darken.octi.desktop.linking.UnlinkResult
 import eu.darken.octi.desktop.modules.meta.DeviceMetadataProvider
 import eu.darken.octi.desktop.platform.PlatformDetector
+import eu.darken.octi.desktop.protocol.octiserver.OctiServer
 import eu.darken.octi.desktop.storage.ThemeMode
 import eu.darken.octi.desktop.ui.LocalAppGraph
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.swing.Swing
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen() {
     val graph = LocalAppGraph.current
     val settings by graph.settings.flow.collectAsState()
+    val activeClient by graph.activeClient.collectAsState()
+    val linkedCredentials = remember(activeClient) { graph.credentialsStore.load() }
 
     Scaffold(
         topBar = {
@@ -79,6 +88,15 @@ fun SettingsScreen() {
                         graph.settings.update { it.copy(deviceLabel = value.ifBlank { null }) }
                     },
                 )
+                ServerSetting(
+                    customServerUrl = settings.customServerUrl.orEmpty(),
+                    linkedServer = linkedCredentials?.serverAdress,
+                    onSave = { value ->
+                        // UI commits only valid (or blank → null) values. The TextField's local
+                        // state stays unconstrained between saves so the user can correct typos.
+                        graph.settings.update { it.copy(customServerUrl = value) }
+                    },
+                )
                 ThemeModeSetting(
                     current = settings.themeMode,
                     onChange = { value ->
@@ -92,12 +110,69 @@ fun SettingsScreen() {
                     },
                 )
                 EncryptionModeRow(
-                    keysetType = graph.credentialsStore.load()?.encryptionKeyset?.type,
+                    keysetType = linkedCredentials?.encryptionKeyset?.type,
                 )
-                AccountSection(onUnlink = { graph.unlink() })
+                AccountSection(graph = graph)
                 AboutSection()
             }
         }
+    }
+}
+
+@Composable
+private fun ServerSetting(
+    customServerUrl: String,
+    linkedServer: OctiServer.Address?,
+    onSave: (String?) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Server", style = MaterialTheme.typography.titleSmall)
+            if (linkedServer != null) {
+                Text(
+                    "Connected to ${linkedServer.address}. Unlink this device to change the server.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                Text(
+                    "URL of the Octi server the \"Create new account\" flow will use. Leave blank " +
+                        "to use the production server (${OctiServer.Official.PROD.address.address}).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                ServerUrlEditor(initial = customServerUrl, onSave = onSave)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ServerUrlEditor(initial: String, onSave: (String?) -> Unit) {
+    var localValue by remember(initial) { mutableStateOf(initial) }
+    val trimmed = localValue.trim()
+    val parseResult = remember(trimmed) {
+        if (trimmed.isEmpty()) null else OctiServer.Address.tryParse(trimmed)
+    }
+    val hasUserEdit = localValue != initial
+    val errorMessage = parseResult?.exceptionOrNull()?.message
+    val canSave = hasUserEdit && parseResult?.isFailure != true
+
+    OutlinedTextField(
+        value = localValue,
+        onValueChange = { localValue = it },
+        singleLine = true,
+        placeholder = { Text(OctiServer.Official.PROD.address.address) },
+        isError = errorMessage != null,
+        supportingText = errorMessage?.let { { Text(it) } },
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End,
+    ) {
+        TextButton(
+            onClick = { onSave(trimmed.takeIf { it.isNotEmpty() }) },
+            enabled = canSave,
+        ) { Text("Save") }
     }
 }
 
@@ -304,22 +379,62 @@ private fun PathRow(
 }
 
 @Composable
-private fun AccountSection(onUnlink: () -> Unit) {
+private fun AccountSection(graph: AppGraph) {
+    var working by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Account", style = MaterialTheme.typography.titleSmall)
             Text(
-                "Unlinking removes this device from your Octi account locally. To also remove " +
-                    "it from the server, delete it from another device's settings.",
+                "Unlinking calls the server to remove this device, then clears local credentials. " +
+                    "If the server can't be reached, local state is kept so you can retry.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            errorMessage?.let { msg ->
+                Text(
+                    text = msg,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             Button(
-                onClick = onUnlink,
+                enabled = !working,
+                onClick = {
+                    errorMessage = null
+                    working = true
+                    // Launch on the app scope so navigation away mid-unlink doesn't cancel the
+                    // server DELETE. UI mutations are hopped onto Swing explicitly — Compose
+                    // state is safest to write from the AWT EDT.
+                    graph.appScope.launch {
+                        val result = try {
+                            graph.unlink()
+                        } catch (cancel: kotlinx.coroutines.CancellationException) {
+                            throw cancel
+                        } catch (e: Throwable) {
+                            UnlinkResult.NetworkError(e)
+                        }
+                        withContext(Dispatchers.Swing) {
+                            when (result) {
+                                UnlinkResult.Success,
+                                UnlinkResult.NotLinked -> Unit
+                                is UnlinkResult.NetworkError -> errorMessage = "Couldn't unlink: " +
+                                    (result.cause.message ?: result.cause.javaClass.simpleName) +
+                                    ". Local credentials kept; try again when online."
+                                is UnlinkResult.LocalCleanupFailed -> errorMessage = "The server " +
+                                    "removed this device, but clearing local credentials failed: " +
+                                    (result.cause.message ?: result.cause.javaClass.simpleName) +
+                                    ". Restart the app and try unlinking again — until that " +
+                                    "succeeds the app will reconnect to a deleted device."
+                            }
+                            working = false
+                        }
+                    }
+                },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.errorContainer,
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                 ),
-            ) { Text("Unlink this device") }
+            ) { Text(if (working) "Unlinking…" else "Unlink this device") }
         }
     }
 }

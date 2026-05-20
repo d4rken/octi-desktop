@@ -135,6 +135,13 @@ data class SettingsData(
      */
     val deviceId: String? = null,
     val deviceLabel: String? = null,
+    /**
+     * User-configured server URL used by the "Create new account" flow. Null or blank means the
+     * production server is used. Values are pre-validated by `OctiServer.Address.tryParse` before
+     * being persisted — bad URLs never reach this field. After a successful create or link the
+     * server lives in the credentials and this field is unused (UI shows it read-only).
+     */
+    val customServerUrl: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val syncIntervalSeconds: Int = 300,
     /** Clipboard auto-sync is opt-in for privacy reasons. See plan for rationale. */
