@@ -62,26 +62,24 @@ jobs:
           deadline=$(( $(date +%s) + BUDGET_MIN * 60 ))
 
           # gh_api_retry: wraps `gh api` so transient 5xx / network errors don't kill the gate.
-          # Returns the body on success, empty on transient failure. Auth/permission errors
-          # (4xx other than 404) still fail the script via `set -e` when the caller checks the
-          # exit code path — handled below by treating "no body" as "retry later".
+          # On success: prints the body to stdout and returns 0.
+          # On 3 consecutive transient failures: prints nothing and returns 0 (caller retries
+          # the whole poll cycle after sleeping).
+          # On auth/permission errors (401/403/404): calls `exit 1` directly — the gate has no
+          # business retrying these and silently waiting 60 minutes for a misconfigured token.
           gh_api_retry() {
             local path="$1"
             local out
-            local rc
             for attempt in 1 2 3; do
               out=$(gh api "$path" 2>&1) && { echo "$out"; return 0; }
-              rc=$?
-              # If the failure looks like auth/permission/not-found, surface and abort.
               # gh prints HTTP status in its error message ("HTTP 401", "HTTP 403", "HTTP 404").
               if grep -qE 'HTTP (401|403|404)' <<<"$out"; then
-                echo "::error::gh api '$path' failed with auth/permission error: $out" >&2
-                return "$rc"
+                echo "::error::gh api '$path' failed with auth/permission error — aborting gate: $out" >&2
+                exit 1
               fi
               echo "transient gh api error (attempt $attempt): $out" >&2
               sleep 5
             done
-            # Three transient failures in a row — return empty, caller retries the whole poll.
             return 0
           }
 
@@ -100,7 +98,7 @@ jobs:
               # Filter by event=push + branch + head_sha so PR runs sharing the same head_sha
               # can't satisfy the gate. per_page=5 picks up retries / reruns; we sort by
               # created_at desc (the API default) and take the most recent matching entry.
-              body=$(gh_api_retry "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?event=push&branch=${BRANCH}&head_sha=${SHA}&per_page=5" || echo "")
+              body=$(gh_api_retry "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?event=push&branch=${BRANCH}&head_sha=${SHA}&per_page=5")
 
               if [[ -z "$body" ]]; then
                 echo "$wf: no API response yet (transient or not registered) — sleeping 20s..."
