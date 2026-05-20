@@ -270,7 +270,7 @@ jobs:
 
   build-macos-intel:
     name: Build macOS Intel .dmg
-    runs-on: macos-13   # Intel
+    runs-on: macos-15-intel   # GitHub's only remaining Intel macOS label; macos-13 was retired 2025-12. Available until August 2027.
     steps:
       - name: Checkout source code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2

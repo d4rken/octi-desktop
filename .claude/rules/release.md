@@ -18,7 +18,7 @@ release-prepare.yml (workflow_dispatch)
                  └─ build (calls build-installers.yml, channel=stable)
                        └─ build-linux             ubuntu-22.04 → .deb + .rpm + .AppImage + .tar.gz
                        └─ build-macos-arm         macos-14    → Octi-X.Y.Z-macos-arm64.dmg
-                       └─ build-macos-intel       macos-13    → Octi-X.Y.Z-macos-x64.dmg
+                       └─ build-macos-intel       macos-15-intel → Octi-X.Y.Z-macos-x64.dmg
                        └─ build-windows           windows-2022 → Octi-X.Y.Z.msi
                  └─ release-github                aggregate + checksums.txt + softprops/action-gh-release
 ```
@@ -146,7 +146,7 @@ push to main / workflow_dispatch
         └─ build (calls build-installers.yml, channel=nightly)
               └─ build-linux            ubuntu-22.04 → octi-nightly_*.deb + .rpm + Octi-nightly.AppImage + .tar.gz
               └─ build-macos-arm        macos-14    → Octi-nightly-macos-arm64.dmg
-              └─ build-macos-intel      macos-13    → Octi-nightly-macos-x64.dmg
+              └─ build-macos-intel      macos-15-intel → Octi-nightly-macos-x64.dmg
               └─ build-windows          windows-2022 → Octi-nightly.msi
         └─ publish-nightly              mint App token, stale-SHA guard, force-move `nightly` tag,
                                         two-step upload (installers first, checksums + body last)
