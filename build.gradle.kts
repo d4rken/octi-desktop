@@ -127,6 +127,16 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // InteropFixtureSync (the cross-repo wire-format fixture fetcher) reads this to locate
+    // fixture-lock.json and write its cache at .cache/interop-fixtures/<sha>/. Without an
+    // explicit value the sync falls back to user.dir, but pinning it here makes IDE-direct
+    // and Gradle invocations agree.
+    systemProperty("interopRepoRoot", projectDir.absolutePath)
+    // Pinning fixture-lock.json as a task input means a lock-only bump invalidates the
+    // cached test result and forces a re-fetch + re-verify. Without this, a `ref` bump can
+    // leave `./gradlew test` UP-TO-DATE and never exercise the new fixtures.
+    inputs.file(layout.projectDirectory.file("fixture-lock.json"))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 val smokeTestSourceSet = sourceSets.create("smokeTest") {

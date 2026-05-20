@@ -70,7 +70,22 @@ If `SMOKE_SERVER_URL` is unset, tests skip cleanly via JUnit assumptions.
 ## What's intentionally NOT here (yet)
 
 - Compose UI tests (`runComposeUiTest`) — not wired in this project yet.
-- Cross-platform encryption fixtures (Android encrypts, desktop decrypts) — Phase C work; today's coverage is per-side unit tests plus server smoke.
+
+## Cross-platform encryption fixtures
+
+`InteropFixtureVerifyTest` pins desktop's [`PayloadEncryption`] and [`StreamingPayloadCipher`]
+against committed Android-produced ciphertext + plaintext + AAD. The fixtures live upstream in
+[`d4rken-org/octi`](https://github.com/d4rken-org/octi) (sync-core/src/test/resources/interop/);
+`fixture-lock.json` at this repo root pins a 40-char commit SHA + the SHA-256 of that commit's
+`manifest.json`. `InteropFixtureSync` fetches and verifies on first `@BeforeAll`; the cache lives
+at `.cache/interop-fixtures/<sha>/` (gitignored).
+
+To bump the pin, change `fixture-lock.json#ref` to a newer app-main commit, recompute
+`manifest_sha256` via `sha256sum` on the manifest at that SHA, and commit both in the same
+change. `./gradlew test` then re-fetches and re-verifies.
+
+If you also touch `StreamingPayloadCipher` or `PayloadEncryption`, expect this test to catch
+the wire-compat break before the smoke suite does.
 
 ## Behavior fixtures vs. enumeration
 
