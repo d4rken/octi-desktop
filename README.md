@@ -74,10 +74,6 @@ Requires JDK 21 (the Gradle toolchain provisions it automatically; system Java j
 
 <img src="fastlane/metadata/desktop/screenshots/01_linking.png" width="240"><img src="fastlane/metadata/desktop/screenshots/02_dashboard_light.png" width="240"><img src="fastlane/metadata/desktop/screenshots/03_dashboard_dark.png" width="240"><img src="fastlane/metadata/desktop/screenshots/04_files.png" width="240"><img src="fastlane/metadata/desktop/screenshots/05_settings.png" width="240">
 
-## Credential storage
-
-Credentials are stored in the OS keystore (libsecret / Keychain / DPAPI). If the keystore is unavailable (e.g. headless Linux without D-Bus), an Argon2id-derived passphrase fallback kicks in and prompts on every launch.
-
 ## Community
 
 Join the [Octi Discord](https://discord.gg/s7V4C6zuVy).
