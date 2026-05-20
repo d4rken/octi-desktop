@@ -5,6 +5,7 @@ import eu.darken.octi.desktop.common.log.Logging.Priority.WARN
 import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
 import eu.darken.octi.desktop.di.AppGraph
+import eu.darken.octi.desktop.protocol.collections.toGzip
 import eu.darken.octi.desktop.protocol.encryption.PayloadEncryption
 import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.meta.MetaInfo
@@ -12,16 +13,17 @@ import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.serialization.Serialization
 import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
-import eu.darken.octi.desktop.protocol.collections.toGzip
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import okio.ByteString.Companion.toByteString
 import java.lang.ProcessHandle
 import java.net.InetAddress
@@ -34,92 +36,139 @@ private val TAG = logTag("Module", "Meta", "Writer")
 
 /**
  * Periodically writes this desktop's [MetaInfo] to `/v1/module/eu.darken.octi.module.core.meta`
- * so peers can see us in the device list with a label, OS, uptime, and version.
+ * on every linked, non-paused connector so peers on each server see us in the device list.
  *
  * Schema follows app-main PR #306: `deviceType=DESKTOP`, generic `osType`/`osVersionName`, all
  * Android-only fields left null. Android peers without #306 see the payload as malformed and
  * skip the meta tile for this device — accepted transitional cost while #306 rolls out.
  *
- * Cadence: write on transition to a fresh active client (cold-start a peer can see us
- * immediately on link), then every [WRITE_INTERVAL]. We skip writes if the data hasn't changed
- * — saves rate-limit budget and avoids triggering a no-op WS broadcast across peers.
+ * Cadence: write to every non-paused connector immediately on appear/relink (the [kickFlow]
+ * trigger), then every [WRITE_INTERVAL]. Per-connector dedupe via
+ * [lastWrittenPayloadByConnector] — if a connector already has the latest bytes we skip the
+ * write to save rate-limit budget. A new connector arriving wakes the loop early so peers see
+ * us within seconds of the link, not up to [WRITE_INTERVAL] later.
+ *
+ * Failures are per-connector independent: one connector throwing doesn't block writes to the
+ * others. The aggregate [lastWriteSuccessAt] is "newest across all connectors" for the
+ * dashboard meta tile (which renders our own device's info regardless of which connector(s)
+ * we successfully reached).
  */
 class MetaWriter(private val graph: AppGraph) {
 
     /**
-     * Per-connector cache of the last successfully written plaintext payload. Used to skip
-     * no-op writes (compare-and-set against this connector's last-written bytes). Today only
-     * primary writes — PR-4's fan-out reads its entry per connector. Stale entries on unlink
-     * are harmless (handler is gone) and pruned lazily as PR-4 lands.
+     * Per-connector cache of the last successfully written plaintext payload. The fan-out loop
+     * reads its entry per connector to skip no-op writes. Pruned on activeConnectors changes
+     * (unlink) so a dead ConnectorId can't keep an entry alive forever.
      */
     private val lastWrittenPayloadByConnector: MutableMap<ConnectorId, ByteArray> = mutableMapOf()
 
-    private val _lastWriteSuccessAt = MutableStateFlow<Instant?>(null)
+    private val _lastWriteSuccessAtByConnector = MutableStateFlow<Map<ConnectorId, Instant>>(emptyMap())
 
     /**
-     * Timestamp of the most recent successful `PUT` of our meta document. Null until the first
-     * write succeeds. Consumed by the debug RPC `/dev/state` endpoint so a developer can tell
-     * at a glance whether the desktop is actively reaching the server.
+     * Per-connector "when did we last successfully PUT meta on this connector?". Settings UI
+     * + debug RPC consume this to surface freshness independently per connector. Missing key =
+     * never successfully written (boot, all attempts failed so far).
      */
-    val lastWriteSuccessAt: StateFlow<Instant?> = _lastWriteSuccessAt.asStateFlow()
+    val lastWriteSuccessAtByConnector: StateFlow<Map<ConnectorId, Instant>> =
+        _lastWriteSuccessAtByConnector.asStateFlow()
+
+    /**
+     * Aggregate "newest meta write across any connector" — keeps the debug RPC top-level field
+     * and the dashboard back-compat callers happy. Null until the first successful write
+     * anywhere.
+     */
+    val lastWriteSuccessAt: StateFlow<Instant?> = _lastWriteSuccessAtByConnector
+        .map { perConnector -> perConnector.values.maxOrNull() }
+        .let { mapped ->
+            val state = MutableStateFlow<Instant?>(null)
+            mapped.onEach { state.value = it }.launchIn(graph.appScope)
+            state.asStateFlow()
+        }
 
     private val _lastWrittenInfo = MutableStateFlow<MetaInfo?>(null)
 
     /**
-     * Snapshot of the [MetaInfo] we most recently *successfully* pushed to the server. Null
-     * until the first write succeeds. Used as the local source for the self-device Meta tile on
-     * the Dashboard — WS suppresses self-events so the server-driven invalidation path would
-     * never refresh our own tile.
+     * Snapshot of the [MetaInfo] we most recently *successfully* pushed. Same content goes to
+     * every connector so this stays a single value rather than per-connector — null until the
+     * first write anywhere succeeds. Used as the local source for the self-device Meta tile on
+     * the Dashboard (WS suppresses self-events so the server-driven invalidation path would
+     * never refresh our own tile).
      */
     val lastWrittenInfo: StateFlow<MetaInfo?> = _lastWrittenInfo.asStateFlow()
 
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    /**
+     * Wake signal for the write loop. New connector appearing, or pause toggling off, kicks
+     * this so the meta write doesn't have to wait the full [WRITE_INTERVAL].
+     */
+    private val kickFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+
     fun start() {
-        graph.primaryConnector
-            .flatMapLatest<OctiServerConnector?, Unit> { connector ->
-                if (connector == null) {
-                    // No active primary — drop the cache so a future relink writes fresh bytes.
-                    lastWrittenPayloadByConnector.clear()
-                    flowOf(Unit)
-                } else {
-                    writeLoop(connector)
-                }
+        // Wake the loop whenever the running-connector set changes. The set changes for any of:
+        // first link, additional link, pause toggle, unlink. The loop self-skips connectors
+        // whose latest payload it already wrote (lastWrittenPayloadByConnector hit).
+        graph.runningConnectors
+            .onEach { kickFlow.tryEmit(Unit) }
+            .launchIn(graph.appScope)
+
+        // Prune the dedupe cache when a connector leaves activeConnectors entirely (unlink).
+        // Paused connectors stay in activeConnectors so their cache survives a pause/resume
+        // round-trip.
+        graph.activeConnectors
+            .onEach { connectors ->
+                val activeIds = connectors.map { it.identifier }.toSet()
+                lastWrittenPayloadByConnector.keys.retainAll(activeIds)
+                _lastWriteSuccessAtByConnector.value =
+                    _lastWriteSuccessAtByConnector.value.filterKeys { it in activeIds }
             }
             .launchIn(graph.appScope)
+
+        graph.appScope.launch {
+            while (true) {
+                val targets = graph.runningConnectors.value
+                if (targets.isNotEmpty()) {
+                    writeOnce(targets)
+                }
+                withTimeoutOrNull(WRITE_INTERVAL.inWholeMilliseconds) { kickFlow.first() }
+            }
+        }
     }
 
-    private fun writeLoop(connector: OctiServerConnector): Flow<Unit> = flow {
-        val client = connector.client
-        val credentials = connector.credentials
-        val connectorId = connector.identifier
-        val crypto = PayloadEncryption(keySet = credentials.encryptionKeyset)
-        while (true) {
+    private suspend fun writeOnce(targets: List<OctiServerConnector>) {
+        val info = buildMetaInfo()
+        val plaintext = Serialization.json.encodeToString(MetaInfo.serializer(), info)
+            .toByteArray(Charsets.UTF_8)
+        // AAD is keyed on OUR deviceId + module — same for every connector.
+        val aad = "${graph.deviceId.id}:${ModuleIds.META.id}".toByteArray(Charsets.UTF_8)
+
+        for (connector in targets) {
+            val connectorId = connector.identifier
+            val lastWritten = lastWrittenPayloadByConnector[connectorId]
+            if (plaintext.contentEquals(lastWritten)) {
+                log(TAG, DEBUG) { "Meta payload unchanged for ${connectorId.logLabel}; skipping" }
+                continue
+            }
             try {
-                val info = buildMetaInfo()
-                val plaintext = Serialization.json.encodeToString(MetaInfo.serializer(), info)
-                    .toByteArray(Charsets.UTF_8)
-                val lastWritten = lastWrittenPayloadByConnector[connectorId]
-                if (plaintext.contentEquals(lastWritten)) {
-                    log(TAG, DEBUG) { "Meta payload unchanged for ${connectorId.logLabel}; skipping" }
-                } else {
-                    // Android wire format: gzip BEFORE encrypt, AAD = "${deviceId}:${moduleId}".
-                    // See ModuleReader.buildAad for the rationale.
-                    val aad = "${graph.deviceId.id}:${ModuleIds.META.id}".toByteArray(Charsets.UTF_8)
-                    val gzipped = plaintext.toByteString().toGzip()
-                    val ciphertext = crypto.encrypt(gzipped, aad).toByteArray()
-                    client.writeModule(ModuleIds.META, ciphertext)
-                    lastWrittenPayloadByConnector[connectorId] = plaintext
-                    _lastWriteSuccessAt.value = Clock.System.now()
-                    _lastWrittenInfo.value = info
-                    log(TAG, DEBUG) {
-                        "Meta payload written to ${connectorId.logLabel} (${plaintext.size}B plaintext, ${ciphertext.size}B ciphertext)"
-                    }
+                // Encrypt per connector — each has its own keyset (different accounts).
+                val crypto = PayloadEncryption(keySet = connector.credentials.encryptionKeyset)
+                val ciphertext = crypto.encrypt(plaintext.toByteString().toGzip(), aad).toByteArray()
+                connector.client.writeModule(ModuleIds.META, ciphertext)
+                lastWrittenPayloadByConnector[connectorId] = plaintext
+                val now = Clock.System.now()
+                _lastWriteSuccessAtByConnector.value =
+                    _lastWriteSuccessAtByConnector.value + (connectorId to now)
+                _lastWrittenInfo.value = info
+                log(TAG, DEBUG) {
+                    "Meta payload written to ${connectorId.logLabel} " +
+                        "(${plaintext.size}B plaintext, ${ciphertext.size}B ciphertext)"
                 }
+            } catch (cancel: CancellationException) {
+                throw cancel
             } catch (e: Throwable) {
+                // One connector failing must not block the others. Next tick retries the
+                // failed connector (no per-connector exponential backoff in v1; if a connector
+                // is permanently broken the user can pause it from Settings).
                 log(TAG, WARN, e) { "Meta write to ${connectorId.logLabel} failed; will retry on next tick" }
             }
-            emit(Unit)
-            delay(WRITE_INTERVAL.inWholeMilliseconds)
         }
     }
 
@@ -133,12 +182,8 @@ class MetaWriter(private val graph: AppGraph) {
         deviceName = hostnameOrUnknown(),
         deviceType = MetaInfo.DeviceType.DESKTOP,
         deviceBootedAt = processStartInstant(),
-        // Generic OS fields (PR #306). os.name on the JVM is "Linux"/"Mac OS X"/"Windows 11"
-        // etc.; os.version is the kernel/build version. Together they give Android peers enough
-        // to render a sensible "Linux 6.8" or "macOS 14.4" label.
         osType = System.getProperty("os.name"),
         osVersionName = System.getProperty("os.version"),
-        // Android-only fields stay null — non-Android clients have no meaningful value here.
     )
 
     private fun processStartInstant(): Instant {

@@ -107,16 +107,29 @@ class ClipboardSync(private val graph: AppGraph) {
         // clipboard right now").
         readLocalClipboardOrNull()?.let { (_, hash) -> bootSnapshotHash = hash }
 
-        // Outbound poll loop.
+        // Outbound poll loop. Fan-out across every non-paused connector — if at least one is
+        // running, we push to it; per-connector dedupe in lastPushedHashByConnector ensures we
+        // only write what's actually new for that connector.
         graph.appScope.launch {
             while (true) {
-                if (graph.settings.data.clipboardAutoSync && graph.primaryConnector.value != null) {
+                if (graph.settings.data.clipboardAutoSync && graph.runningConnectors.value.isNotEmpty()) {
                     runCatching { tryPushLocalClipboard() }
                         .onFailure { log(TAG, WARN, it) { "Outbound clipboard push failed" } }
                 }
                 delay(POLL_INTERVAL.inWholeMilliseconds)
             }
         }
+
+        // Prune the per-connector hash cache when a connector leaves activeConnectors so an
+        // unlinked ConnectorId can't keep an entry alive. Paused connectors stay in
+        // activeConnectors and keep their entry, so a pause-and-resume doesn't trigger a
+        // redundant re-push.
+        graph.activeConnectors
+            .onEach { connectors ->
+                val activeIds = connectors.map { it.identifier }.toSet()
+                lastPushedHashByConnector.keys.retainAll(activeIds)
+            }
+            .launchIn(graph.appScope)
 
         // Inbound: react to ModuleChanged for the clipboard module. Self-events are already
         // filtered by the WebSocket client; we still don't need to guard against own deviceId.
@@ -138,27 +151,47 @@ class ClipboardSync(private val graph: AppGraph) {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size > ClipboardInfo.MAX_BYTES) return
 
-        val connector = graph.primaryConnector.value ?: return
-        val connectorId = connector.identifier
+        // Apply-suppression is global — if this hash is what a peer just sent us, we never
+        // want to echo it back to ANY connector regardless of which one's caches are stale.
+        if (hash == lastAppliedHash) return
 
-        // Echo suppression: don't push something we just pushed to THIS connector, don't push
-        // something a peer sent us (already applied locally), and don't push pre-existing
-        // clipboard content the user had before linking.
-        val lastPushedForThisConnector = lastPushedHashByConnector[connectorId] ?: bootSnapshotHash
-        if (hash == lastPushedForThisConnector || hash == lastAppliedHash) return
+        val targets = graph.runningConnectors.value
+        if (targets.isEmpty()) return
 
-        val client = connector.client
-        val crypto = PayloadEncryption(keySet = connector.credentials.encryptionKeyset)
         val info = ClipboardInfo(type = ClipboardInfo.Type.SIMPLE_TEXT, data = bytes.toByteString())
         val plaintext = Serialization.json.encodeToString(ClipboardInfo.serializer(), info)
             .toByteArray(Charsets.UTF_8)
-        // Android wire format: gzip then encrypt with AAD = "${deviceId}:${moduleId}".
         val aad = "${graph.deviceId.id}:${ModuleIds.CLIPBOARD.id}".toByteArray(Charsets.UTF_8)
-        val ciphertext = crypto.encrypt(plaintext.toByteString().toGzip(), aad).toByteArray()
-        client.writeModule(ModuleIds.CLIPBOARD, ciphertext)
-        lastPushedHashByConnector[connectorId] = hash
-        _lastPushedInfo.value = info
-        log(TAG, DEBUG) { "Pushed clipboard payload (${bytes.size}B) to ${connectorId.logLabel}" }
+
+        var anySuccess = false
+        for (connector in targets) {
+            val connectorId = connector.identifier
+            // Per-connector dedupe: if THIS connector already has this hash, skip. Pre-link
+            // baseline hash applies per connector on first contact so existing user data
+            // doesn't auto-push the moment a connector is added.
+            val lastPushedForThisConnector = lastPushedHashByConnector[connectorId] ?: bootSnapshotHash
+            if (hash == lastPushedForThisConnector) {
+                log(TAG, DEBUG) { "Clipboard hash unchanged for ${connectorId.logLabel}; skipping" }
+                continue
+            }
+            try {
+                val crypto = PayloadEncryption(keySet = connector.credentials.encryptionKeyset)
+                val ciphertext = crypto.encrypt(plaintext.toByteString().toGzip(), aad).toByteArray()
+                connector.client.writeModule(ModuleIds.CLIPBOARD, ciphertext)
+                lastPushedHashByConnector[connectorId] = hash
+                anySuccess = true
+                log(TAG, DEBUG) { "Pushed clipboard payload (${bytes.size}B) to ${connectorId.logLabel}" }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (e: Throwable) {
+                log(TAG, WARN, e) { "Clipboard push to ${connectorId.logLabel} failed; will retry next tick" }
+            }
+        }
+        if (anySuccess) {
+            // Dashboard's self-clipboard tile uses this snapshot. Content is identical across
+            // connectors so one source-of-truth value is correct.
+            _lastPushedInfo.value = info
+        }
     }
 
     private suspend fun tryPullPeerClipboard(event: EventPayload.Event.ModuleChanged) {

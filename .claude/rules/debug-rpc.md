@@ -54,12 +54,14 @@ All authenticated calls require header `X-Debug-Token: <value>`.
   "version": "0.1.0-dev",
   "deviceId": "...",
   "screen": "dashboard",              // or "linking", "settings", "device:<id>", "files:<id>", "clipboard"
-  "connectors": [                     // 0-or-1 entries today; array shape is multi-connector ready
+  "connectors": [
     {
       "id": "kserver-prod.kserver.octi.darken.eu-<uuid>",
       "type": "octiserver",
-      "webSocketState": "Connected",  // Idle | Connecting | Connected | Reconnecting | PollingFallback
-      "deviceListLoadState": "Ok"     // Loading | Ok | Error
+      "webSocketState": "Connected",        // Idle | Connecting | Connected | Reconnecting | PollingFallback
+      "deviceListLoadState": "Ok",          // Loading | Ok | Error
+      "paused": false,                      // user toggled pause from Settings; pollers + writers skip when true
+      "lastMetaWriteSuccessAt": "..."       // newest successful meta PUT on THIS connector; null if never
     }
   ],
   "deviceCount": 2,
@@ -69,8 +71,8 @@ All authenticated calls require header `X-Debug-Token: <value>`.
     {"deviceId": "...", "label": "Pixel 8",   "platform": "android",       "lastSeen": "...",
      "capabilities": [...], "sources": ["kserver-prod.kserver.octi.darken.eu-<uuid>"]}
   ],
-  "lastMetaWriteSuccessAt": "...",     // null until our first /v1/module/.../meta write succeeds
-  "lastWsEventAt": null                // null until the first inbound WS event arrives
+  "lastMetaWriteSuccessAt": "...",          // newest across all connectors; null until any /v1/module/.../meta write succeeds
+  "lastWsEventAt": null                     // null until the first inbound WS event arrives
 }
 ```
 

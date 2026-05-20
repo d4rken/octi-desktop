@@ -260,6 +260,7 @@ private fun ConnectorsSection(graph: AppGraph) {
     val wsStates by graph.webSocketClient.statesByConnector.collectAsState()
     val loadStates by graph.deviceListRepo.loadStateByConnector.collectAsState()
     val mergedDevices by graph.deviceListRepo.mergedDevices.collectAsState()
+    val lastWritesByConnector by graph.metaWriter.lastWriteSuccessAtByConnector.collectAsState()
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
@@ -290,6 +291,7 @@ private fun ConnectorsSection(graph: AppGraph) {
                     wsState = wsStates[id],
                     loadState = loadStates[id],
                     deviceCount = deviceCount,
+                    lastWriteSuccessAt = lastWritesByConnector[id],
                 )
             }
         }
@@ -315,6 +317,7 @@ private fun ConnectorCard(
     wsState: OctiServerWebSocketClient.ConnectionState?,
     loadState: DeviceListRepo.LoadState?,
     deviceCount: Int,
+    lastWriteSuccessAt: kotlin.time.Instant?,
 ) {
     var working by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -355,6 +358,7 @@ private fun ConnectorCard(
                     loadState = loadState,
                     deviceCount = deviceCount,
                     paused = paused,
+                    lastWriteSuccessAt = lastWriteSuccessAt,
                 )
                 Text(
                     text = "Encryption: $keysetType",
@@ -431,6 +435,7 @@ private fun ConnectorStatusLine(
     loadState: DeviceListRepo.LoadState?,
     deviceCount: Int,
     paused: Boolean,
+    lastWriteSuccessAt: kotlin.time.Instant?,
 ) {
     val wsLabel = when {
         paused -> "Paused"
@@ -448,11 +453,34 @@ private fun ConnectorStatusLine(
         loadState is DeviceListRepo.LoadState.Error -> "Device list error: ${loadState.message}"
         else -> "$deviceCount device(s)"
     }
-    Text(
-        text = "$wsLabel · $deviceLabel",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = "$wsLabel · $deviceLabel",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "Last sync · ${lastWriteSuccessAt?.formatAsLocalTime() ?: "—"}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Format an [Instant] as a short local-time string for the Settings card. Uses the system
+ * default zone — the Settings card is only ever read by the user on the host where the app
+ * runs, so zone-aware formatting is correct. Falls back to ISO if the platform's date-time
+ * formatter throws for any reason.
+ */
+private fun kotlin.time.Instant.formatAsLocalTime(): String = try {
+    val javaInstant = java.time.Instant.ofEpochMilli(this.toEpochMilliseconds())
+    val localDateTime = javaInstant
+        .atZone(java.time.ZoneId.systemDefault())
+        .toLocalDateTime()
+    java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss").format(localDateTime)
+} catch (_: Throwable) {
+    this.toString()
 }
 
 @Composable

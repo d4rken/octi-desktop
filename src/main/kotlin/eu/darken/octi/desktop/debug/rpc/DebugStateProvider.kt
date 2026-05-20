@@ -70,6 +70,11 @@ class DebugStateProvider(private val graph: AppGraph) : DebugStateSource {
     private fun connectorsArray() = buildJsonArray {
         val wsStates = graph.webSocketClient.statesByConnector.value
         val loadStates = graph.deviceListRepo.loadStateByConnector.value
+        val pausedIds = graph.settings.data.connectors
+            .filterValues { it.paused }
+            .map { it.value.connectorId }
+            .toSet()
+        val lastWritesByConnector = graph.metaWriter.lastWriteSuccessAtByConnector.value
         graph.activeConnectors.value.forEach { connector ->
             val id = connector.identifier
             add(buildJsonObject {
@@ -77,6 +82,8 @@ class DebugStateProvider(private val graph: AppGraph) : DebugStateSource {
                 put("type", JsonPrimitive(id.type.typeId))
                 put("webSocketState", JsonPrimitive(wsStates[id]?.let { it::class.simpleName } ?: "Idle"))
                 put("deviceListLoadState", JsonPrimitive(loadStates[id]?.let { it::class.simpleName } ?: "Loading"))
+                put("paused", JsonPrimitive(id in pausedIds))
+                put("lastMetaWriteSuccessAt", lastWritesByConnector[id]?.toString().toJson())
             })
         }
     }
