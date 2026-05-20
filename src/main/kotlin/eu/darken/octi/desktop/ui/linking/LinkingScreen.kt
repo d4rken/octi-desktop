@@ -47,7 +47,7 @@ import eu.darken.octi.desktop.ui.nav.Screen
  *  - **Existing account** — paste a link code from another device. Server is dictated by the
  *    code's `serverAddress`.
  *  - **New account** — register a brand-new account against either the production server (blank
- *    input) or a user-provided URL/IP+port. The same URL value backs `Settings.customServerUrl`.
+ *    input) or a user-provided URL/IP+port. The same URL value backs `Settings.createAccountServerUrl`.
  *
  * The Settings icon in the app bar is reachable pre-link so the user can configure other
  * options (theme, label) before either path.
@@ -62,8 +62,8 @@ fun LinkingScreen() {
     val settingsSnapshot by graph.settings.flow.collectAsState()
 
     var rawCode by remember { mutableStateOf("") }
-    var serverUrlInput by remember(settingsSnapshot.customServerUrl) {
-        mutableStateOf(settingsSnapshot.customServerUrl.orEmpty())
+    var serverUrlInput by remember(settingsSnapshot.createAccountServerUrl) {
+        mutableStateOf(settingsSnapshot.createAccountServerUrl.orEmpty())
     }
 
     val isWorking = state is LinkingUiState.Working

@@ -91,9 +91,11 @@ fun DashboardScreen() {
         }
     }
 
-    // Prune stale per-device layout entries — but only after the first successful load so we
-    // don't wipe everything during the empty `Initial` / `Loading` window. Read the stale set
-    // from the collected `settings` snapshot (not graph.settings.data, which would race a
+    // Prune stale per-device layout entries — but only after a successful load. The aggregate
+    // [DeviceListRepo.loadState] returns `Ok` only when EVERY configured connector reports Ok,
+    // so this gate is multi-connector-safe: a single offline connector won't cause us to wipe
+    // layouts for devices that only happen to be visible via that connector. Read the stale
+    // set from the collected `settings` snapshot (not graph.settings.data, which would race a
     // second read-lock acquisition).
     LaunchedEffect(devices, loadState) {
         if (loadState !is DeviceListRepo.LoadState.Ok) return@LaunchedEffect
@@ -236,8 +238,7 @@ private fun EmptyState(loadState: DeviceListRepo.LoadState) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when (loadState) {
-                is DeviceListRepo.LoadState.Loading,
-                DeviceListRepo.LoadState.Initial -> CircularProgressIndicator()
+                DeviceListRepo.LoadState.Loading -> CircularProgressIndicator()
                 is DeviceListRepo.LoadState.Error -> Text(
                     text = "Couldn't reach the server: ${loadState.message}",
                     color = MaterialTheme.colorScheme.error,

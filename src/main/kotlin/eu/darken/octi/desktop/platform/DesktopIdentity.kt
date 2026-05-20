@@ -20,21 +20,30 @@ sealed class DesktopIdentity {
     /** Lower-case, filesystem-safe app name. Used as the config / data directory leaf. */
     abstract val appName: String
 
-    /** Keystore entry key (libsecret `account` / Keychain `-a` / DPAPI filename stem). */
-    abstract val credentialsKey: String
+    /**
+     * Keystore key prefix for credentials entries. Each saved credential set is stored under
+     * `"$credentialsKeyPrefix.${connectorId.idString}"`, so a single channel can host multiple
+     * connector accounts without collision. Channel-aware so canary and stable never share an
+     * entry — see [credentialsKeyFor].
+     */
+    abstract val credentialsKeyPrefix: String
 
     /** Keystore service label (libsecret `service` / Keychain `-s`). Not used by DPAPI. */
     abstract val keystoreServiceLabel: String
 
+    /** Compose the full keystore key for a given connector identifier. */
+    fun credentialsKeyFor(connectorIdString: String): String =
+        "$credentialsKeyPrefix.$connectorIdString"
+
     data object Stable : DesktopIdentity() {
         override val appName = "octi"
-        override val credentialsKey = "octiserver.credentials.active"
+        override val credentialsKeyPrefix = "octiserver.credentials"
         override val keystoreServiceLabel = "eu.darken.octi.desktop"
     }
 
     data object Canary : DesktopIdentity() {
         override val appName = "octi-canary"
-        override val credentialsKey = "octiserver.credentials.active.canary"
+        override val credentialsKeyPrefix = "octiserver.credentials.canary"
         override val keystoreServiceLabel = "eu.darken.octi.desktop.canary"
     }
 

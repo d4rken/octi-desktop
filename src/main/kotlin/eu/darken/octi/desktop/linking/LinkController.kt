@@ -10,10 +10,14 @@ import eu.darken.octi.desktop.protocol.encryption.PayloadEncryption
 import eu.darken.octi.desktop.protocol.octiserver.DeviceMetadata
 import eu.darken.octi.desktop.protocol.octiserver.LinkingData
 import eu.darken.octi.desktop.protocol.octiserver.OctiServer
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector.Companion.toConnectorId
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpException
 import eu.darken.octi.desktop.protocol.serialization.Serialization
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
+import eu.darken.octi.desktop.storage.ConnectorConfig
+import eu.darken.octi.desktop.storage.Settings
 import io.ktor.http.HttpStatusCode
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
@@ -29,6 +33,11 @@ private val TAG = logTag("Link", "Controller")
  *  - [link] consumes a share code and registers a device; rollback = `DELETE /v1/devices/{self}`.
  *  - [createAccount] creates a brand-new account; rollback = `DELETE /v1/account`.
  *
+ * Two-store commit: a successful link must end with BOTH a keystore entry AND a matching
+ * `SettingsData.connectors[idString]` entry. Keystore-first (so a credential is never half-saved
+ * to a discovery index pointing at nothing), then settings; on settings failure we best-effort
+ * clear the keystore entry and roll back on the server (see [LinkResult.SettingsPersistFailedRolledBack]).
+ *
  * [DeviceMetadata] is rebuilt at submit time (via [deviceMetadataProvider]) so user edits to
  * the device label on the Linking screen are honored on the very next attempt.
  *
@@ -42,6 +51,7 @@ private val TAG = logTag("Link", "Controller")
 class LinkController(
     private val deviceMetadataProvider: () -> DeviceMetadata,
     private val credentialsStore: CredentialsStore,
+    private val settings: Settings,
     private val httpClientFactory: HttpClientFactory = DefaultHttpClientFactory,
     private val gcmSivAvailable: () -> Boolean = { CryptoBootstrap.gcmSivAvailable },
 ) {
@@ -101,9 +111,9 @@ class LinkController(
                 }
             }
 
-            // Stage 4: persist locally. Save success is the SUCCESS commit point — anything that
-            // fails after the save (including the unauthed client's close()) is NOT a save
-            // failure and must not trigger rollback.
+            val connectorId = newCredentials.toConnectorId()
+
+            // Stage 4a: keystore. Keystore-first so a discovery entry never points at nothing.
             try {
                 credentialsStore.save(newCredentials)
             } catch (cancel: CancellationException) {
@@ -118,8 +128,32 @@ class LinkController(
                     keystoreCause = keystoreCause,
                 )
             }
-            log(TAG, INFO) { "Link succeeded for account=${newCredentials.accountId.id.take(8)}..." }
-            return LinkResult.Success
+
+            // Stage 4b: discovery index. Keystore was the durable commit for the credential
+            // bytes; this is the durable commit for "a connector exists with this id". Failure
+            // here means we have an unreachable keystore blob (no idString in settings → no key
+            // to query) — best-effort cleanup + server rollback.
+            try {
+                settings.update { current ->
+                    current.copy(
+                        connectors = current.connectors + (connectorId.idString to ConnectorConfig(connectorId)),
+                    )
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (settingsCause: Throwable) {
+                log(TAG, ERROR, settingsCause) { "Settings.connectors write failed; rolling back keystore + server" }
+                return rollbackSettingsForLink(
+                    address = linkingData.serverAdress,
+                    deviceId = deviceId,
+                    deviceMetadata = deviceMetadata,
+                    credentials = newCredentials,
+                    connectorId = connectorId,
+                    settingsCause = settingsCause,
+                )
+            }
+            log(TAG, INFO) { "Link succeeded for connector=${connectorId.idString}" }
+            return LinkResult.Success(connectorId, newCredentials)
         } finally {
             // A throwing close() must NOT propagate over a `return Success` (or any other
             // return) — otherwise a healthy save + a flaky transport teardown turns into a
@@ -151,6 +185,42 @@ class LinkController(
         } catch (rollbackCause: Throwable) {
             log(TAG, ERROR, rollbackCause) { "Rollback DELETE failed; device is orphaned on server" }
             LinkResult.OrphanedDevice(keystoreCause, rollbackCause)
+        } finally {
+            runCatching { authedClient.close() }
+                .onFailure { log(TAG, WARN, it) { "authedClient.close() failed; swallowing to preserve return value" } }
+        }
+    }
+
+    private suspend fun rollbackSettingsForLink(
+        address: OctiServer.Address,
+        deviceId: DeviceId,
+        deviceMetadata: DeviceMetadata,
+        credentials: OctiServer.Credentials,
+        connectorId: ConnectorId,
+        settingsCause: Throwable,
+    ): LinkResult {
+        val keystoreCleanup = runCatching { credentialsStore.clear(connectorId) }
+        keystoreCleanup.onFailure {
+            log(TAG, WARN, it) { "Best-effort keystore cleanup failed; orphan blob remains unreachable" }
+        }
+        val authedClient = httpClientFactory.create(
+            address = address,
+            deviceId = deviceId,
+            deviceMetadata = deviceMetadata,
+            credentials = credentials,
+        )
+        return try {
+            authedClient.deleteDevice(deviceId)
+            log(TAG, WARN) { "Settings rollback: server DELETE /v1/devices/{self} succeeded" }
+            LinkResult.SettingsPersistFailedRolledBack(
+                cause = settingsCause,
+                keystoreCleanupFailure = keystoreCleanup.exceptionOrNull(),
+            )
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (rollbackCause: Throwable) {
+            log(TAG, ERROR, rollbackCause) { "Settings rollback DELETE failed; device is orphaned on server" }
+            LinkResult.OrphanedDevice(settingsCause, rollbackCause)
         } finally {
             runCatching { authedClient.close() }
                 .onFailure { log(TAG, WARN, it) { "authedClient.close() failed; swallowing to preserve return value" } }
@@ -198,6 +268,8 @@ class LinkController(
                 }
             }
 
+            val connectorId = newCredentials.toConnectorId()
+
             try {
                 credentialsStore.save(newCredentials)
             } catch (cancel: CancellationException) {
@@ -212,8 +284,28 @@ class LinkController(
                     keystoreCause = keystoreCause,
                 )
             }
-            log(TAG, INFO) { "Account created for account=${newCredentials.accountId.id.take(8)}... on ${address.address}" }
-            return CreateAccountResult.Success
+
+            try {
+                settings.update { current ->
+                    current.copy(
+                        connectors = current.connectors + (connectorId.idString to ConnectorConfig(connectorId)),
+                    )
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (settingsCause: Throwable) {
+                log(TAG, ERROR, settingsCause) { "Settings.connectors write failed; rolling back keystore + account" }
+                return rollbackSettingsForCreate(
+                    address = address,
+                    deviceId = deviceId,
+                    deviceMetadata = deviceMetadata,
+                    credentials = newCredentials,
+                    connectorId = connectorId,
+                    settingsCause = settingsCause,
+                )
+            }
+            log(TAG, INFO) { "Account created for connector=${connectorId.idString} on ${address.address}" }
+            return CreateAccountResult.Success(connectorId, newCredentials)
         } finally {
             // A throwing close() must NOT propagate over a `return Success` (or any other
             // return) — otherwise a healthy save + a flaky transport teardown turns into a
@@ -245,6 +337,42 @@ class LinkController(
         } catch (rollbackCause: Throwable) {
             log(TAG, ERROR, rollbackCause) { "Rollback DELETE /v1/account failed; account is orphaned on server" }
             CreateAccountResult.OrphanedAccount(keystoreCause, rollbackCause)
+        } finally {
+            runCatching { authedClient.close() }
+                .onFailure { log(TAG, WARN, it) { "authedClient.close() failed; swallowing to preserve return value" } }
+        }
+    }
+
+    private suspend fun rollbackSettingsForCreate(
+        address: OctiServer.Address,
+        deviceId: DeviceId,
+        deviceMetadata: DeviceMetadata,
+        credentials: OctiServer.Credentials,
+        connectorId: ConnectorId,
+        settingsCause: Throwable,
+    ): CreateAccountResult {
+        val keystoreCleanup = runCatching { credentialsStore.clear(connectorId) }
+        keystoreCleanup.onFailure {
+            log(TAG, WARN, it) { "Best-effort keystore cleanup failed; orphan blob remains unreachable" }
+        }
+        val authedClient = httpClientFactory.create(
+            address = address,
+            deviceId = deviceId,
+            deviceMetadata = deviceMetadata,
+            credentials = credentials,
+        )
+        return try {
+            authedClient.deleteAccount()
+            log(TAG, WARN) { "Settings rollback: server DELETE /v1/account succeeded" }
+            CreateAccountResult.SettingsPersistFailedRolledBack(
+                cause = settingsCause,
+                keystoreCleanupFailure = keystoreCleanup.exceptionOrNull(),
+            )
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (rollbackCause: Throwable) {
+            log(TAG, ERROR, rollbackCause) { "Settings rollback DELETE /v1/account failed; account is orphaned on server" }
+            CreateAccountResult.OrphanedAccount(settingsCause, rollbackCause)
         } finally {
             runCatching { authedClient.close() }
                 .onFailure { log(TAG, WARN, it) { "authedClient.close() failed; swallowing to preserve return value" } }

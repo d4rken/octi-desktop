@@ -8,7 +8,7 @@ import eu.darken.octi.desktop.di.AppGraph
 import eu.darken.octi.desktop.protocol.encryption.PayloadEncryption
 import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.meta.MetaInfo
-import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.serialization.Serialization
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import kotlinx.coroutines.delay
@@ -68,43 +68,40 @@ class MetaWriter(private val graph: AppGraph) {
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun start() {
-        graph.activeClient
-            .flatMapLatest<OctiServerHttpClient?, Unit> { client ->
-                if (client == null) {
+        graph.primaryConnector
+            .flatMapLatest<OctiServerConnector?, Unit> { connector ->
+                if (connector == null) {
                     lastWrittenPayload = null
                     flowOf(Unit)
                 } else {
-                    writeLoop(client)
+                    writeLoop(connector)
                 }
             }
             .launchIn(graph.appScope)
     }
 
-    private fun writeLoop(client: OctiServerHttpClient): Flow<Unit> = flow {
+    private fun writeLoop(connector: OctiServerConnector): Flow<Unit> = flow {
+        val client = connector.client
+        val credentials = connector.credentials
+        val crypto = PayloadEncryption(keySet = credentials.encryptionKeyset)
         while (true) {
             try {
                 val info = buildMetaInfo()
-                val credentials = graph.credentialsStore.load()
-                if (credentials == null) {
-                    log(TAG, WARN) { "No credentials loaded during meta write; skipping" }
+                val plaintext = Serialization.json.encodeToString(MetaInfo.serializer(), info)
+                    .toByteArray(Charsets.UTF_8)
+                if (plaintext.contentEquals(lastWrittenPayload)) {
+                    log(TAG, DEBUG) { "Meta payload unchanged since last write; skipping" }
                 } else {
-                    val crypto = PayloadEncryption(keySet = credentials.encryptionKeyset)
-                    val plaintext = Serialization.json.encodeToString(MetaInfo.serializer(), info)
-                        .toByteArray(Charsets.UTF_8)
-                    if (plaintext.contentEquals(lastWrittenPayload)) {
-                        log(TAG, DEBUG) { "Meta payload unchanged since last write; skipping" }
-                    } else {
-                        // Android wire format: gzip BEFORE encrypt, AAD = "${deviceId}:${moduleId}".
-                        // See ModuleReader.buildAad for the rationale.
-                        val aad = "${graph.deviceId.id}:${ModuleIds.META.id}".toByteArray(Charsets.UTF_8)
-                        val gzipped = plaintext.toByteString().toGzip()
-                        val ciphertext = crypto.encrypt(gzipped, aad).toByteArray()
-                        client.writeModule(ModuleIds.META, ciphertext)
-                        lastWrittenPayload = plaintext
-                        _lastWriteSuccessAt.value = Clock.System.now()
-                        _lastWrittenInfo.value = info
-                        log(TAG, DEBUG) { "Meta payload written (${plaintext.size}B plaintext, ${ciphertext.size}B ciphertext)" }
-                    }
+                    // Android wire format: gzip BEFORE encrypt, AAD = "${deviceId}:${moduleId}".
+                    // See ModuleReader.buildAad for the rationale.
+                    val aad = "${graph.deviceId.id}:${ModuleIds.META.id}".toByteArray(Charsets.UTF_8)
+                    val gzipped = plaintext.toByteString().toGzip()
+                    val ciphertext = crypto.encrypt(gzipped, aad).toByteArray()
+                    client.writeModule(ModuleIds.META, ciphertext)
+                    lastWrittenPayload = plaintext
+                    _lastWriteSuccessAt.value = Clock.System.now()
+                    _lastWrittenInfo.value = info
+                    log(TAG, DEBUG) { "Meta payload written (${plaintext.size}B plaintext, ${ciphertext.size}B ciphertext)" }
                 }
             } catch (e: Throwable) {
                 log(TAG, WARN, e) { "Meta write failed; will retry on next tick" }

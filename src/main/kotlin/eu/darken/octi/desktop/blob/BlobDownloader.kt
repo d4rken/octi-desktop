@@ -55,8 +55,9 @@ class BlobDownloader(private val graph: AppGraph) {
         expectedChecksumHex: String,
         destinationFile: Path,
     ): Result {
-        val client = graph.activeClient.value ?: return Result.NoClient
-        val credentials = graph.credentialsStore.load() ?: return Result.NoCredentials
+        val connector = graph.primaryConnector.value ?: return Result.NoClient
+        val client = connector.client
+        val credentials = connector.credentials
 
         Files.createDirectories(destinationFile.parent)
         val tempFile = destinationFile.resolveSibling(".${destinationFile.fileName}.dl.${System.nanoTime()}")

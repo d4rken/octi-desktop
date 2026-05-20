@@ -13,12 +13,10 @@ import eu.darken.octi.desktop.protocol.encryption.EncryptionMode
 import eu.darken.octi.desktop.protocol.encryption.PayloadEncryption
 import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.files.FileShareInfo
-import eu.darken.octi.desktop.protocol.octiserver.OctiServer
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.octiserver.dto.ModuleCommitRequest
 import eu.darken.octi.desktop.protocol.octiserver.ws.EventPayload
 import eu.darken.octi.desktop.protocol.serialization.Serialization
-import eu.darken.octi.desktop.protocol.sync.ConnectorId
-import eu.darken.octi.desktop.protocol.sync.ConnectorType
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.protocol.sync.RemoteBlobRef
 import eu.darken.octi.desktop.sync.ModuleReader
@@ -65,11 +63,11 @@ class FileShareRepo(private val graph: AppGraph) {
     private var ownEtag: String? = null
 
     fun start() {
-        // Pull our own document on every transition into an active client + on every WS
+        // Pull our own document on every transition into an active connector + on every WS
         // ModuleChanged that targets our own files document (peer issued a deleteRequest
         // against us, etc.).
-        graph.activeClient
-            .onEach { client -> if (client != null) refreshOwn() }
+        graph.primaryConnector
+            .onEach { connector -> if (connector != null) refreshOwn() }
             .launchIn(graph.appScope)
 
         graph.syncEventBus.events
@@ -129,7 +127,8 @@ class FileShareRepo(private val graph: AppGraph) {
         displayName: String? = null,
         mimeType: String = "application/octet-stream",
     ): ShareResult {
-        val credentials = graph.credentialsStore.load() ?: return ShareResult.NoCredentials
+        val connector = graph.primaryConnector.value ?: return ShareResult.NoCredentials
+        val credentials = connector.credentials
         val blobKey = UUID.randomUUID().toString()
 
         val uploadResult = uploader.upload(
@@ -144,7 +143,7 @@ class FileShareRepo(private val graph: AppGraph) {
             else -> return ShareResult.UploadFailed(uploadResult)
         }
 
-        val connectorIdString = currentConnectorIdString(credentials)
+        val connectorIdString = connector.identifier.idString
         val sharedFile = FileShareInfo.SharedFile(
             name = displayName ?: sourceFile.fileName.toString(),
             mimeType = mimeType,
@@ -161,7 +160,7 @@ class FileShareRepo(private val graph: AppGraph) {
             val current = _ownFiles.value ?: FileShareInfo()
             val updated = current.copy(files = current.files + sharedFile)
             try {
-                commitOwn(updated, credentials)
+                commitOwn(updated, connector)
                 _ownFiles.value = updated
                 log(TAG, INFO) { "Shared file ${sharedFile.name} (blobKey=$blobKey)" }
                 ShareResult.Ok(sharedFile)
@@ -178,7 +177,7 @@ class FileShareRepo(private val graph: AppGraph) {
      * /blobs/{id} directly; respect the module's deleteRequests lifecycle).
      */
     suspend fun requestDeletion(targetDeviceId: DeviceId, blobKey: String): ShareResult {
-        val credentials = graph.credentialsStore.load() ?: return ShareResult.NoCredentials
+        val connector = graph.primaryConnector.value ?: return ShareResult.NoCredentials
         return ownDocLock.withLock {
             val current = _ownFiles.value ?: FileShareInfo()
             val request = FileShareInfo.DeleteRequest(
@@ -189,7 +188,7 @@ class FileShareRepo(private val graph: AppGraph) {
             )
             val updated = current.copy(deleteRequests = current.deleteRequests + request)
             try {
-                commitOwn(updated, credentials)
+                commitOwn(updated, connector)
                 _ownFiles.value = updated
                 ShareResult.Ok(sharedFile = null)
             } catch (e: Throwable) {
@@ -200,9 +199,9 @@ class FileShareRepo(private val graph: AppGraph) {
     }
 
     @OptIn(ExperimentalEncodingApi::class)
-    private suspend fun commitOwn(info: FileShareInfo, credentials: OctiServer.Credentials) {
-        val client = graph.activeClient.value
-            ?: throw IllegalStateException("No active client; cannot commit FileShareInfo")
+    private suspend fun commitOwn(info: FileShareInfo, connector: OctiServerConnector) {
+        val client = connector.client
+        val credentials = connector.credentials
         val crypto = PayloadEncryption(keySet = credentials.encryptionKeyset)
         val plaintext = Serialization.json.encodeToString(FileShareInfo.serializer(), info)
             .toByteArray(Charsets.UTF_8)
@@ -211,7 +210,7 @@ class FileShareRepo(private val graph: AppGraph) {
         val ciphertext = crypto.encrypt(plaintext.toByteString().toGzip(), aad).toByteArray()
         val documentBase64 = Base64.Default.encode(ciphertext)
 
-        val connectorIdString = currentConnectorIdString(credentials)
+        val connectorIdString = connector.identifier.idString
         val blobRefs = info.files
             .mapNotNull { it.connectorRefs[connectorIdString]?.value }
             .distinct()
@@ -230,7 +229,7 @@ class FileShareRepo(private val graph: AppGraph) {
     }
 
     private suspend fun refreshOwnEtag() {
-        val client = graph.activeClient.value ?: return
+        val client = graph.primaryConnector.value?.client ?: return
         try {
             when (val response = client.readModule(ModuleIds.FILES, graph.deviceId)) {
                 is eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient.ModuleReadResult.Ok -> {
@@ -242,16 +241,6 @@ class FileShareRepo(private val graph: AppGraph) {
             log(TAG, WARN, e) { "Failed to refresh own FileShareInfo ETag" }
         }
     }
-
-    private fun currentConnectorIdString(credentials: OctiServer.Credentials): String =
-        ConnectorId(
-            type = ConnectorType.OCTISERVER,
-            // Domain as subtype: stable per server, lets a future multi-server build keep
-            // refs from different servers distinct. AccountId completes the triple so two
-            // accounts on the same server stay separate.
-            subtype = credentials.serverAdress.domain,
-            account = credentials.accountId.id,
-        ).idString
 
     sealed class ShareResult {
         data class Ok(val sharedFile: FileShareInfo.SharedFile?) : ShareResult()

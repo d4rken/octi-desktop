@@ -1,6 +1,8 @@
 package eu.darken.octi.desktop.storage
 
 import eu.darken.octi.desktop.protocol.module.ModuleIds
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
+import eu.darken.octi.desktop.protocol.sync.ConnectorType
 import eu.darken.octi.desktop.ui.dashboard.layout.TileLayoutConfig
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
@@ -79,5 +81,27 @@ class SettingsDataTest {
         // (encodeDefaults = true is the file's defensive default).
         encoded.contains("\"tileLayouts\"") shouldBe true
         encoded.contains("\"defaultTileLayout\"") shouldBe true
+        // 'connectors' is the discovery index for CredentialsStore — must always serialize so a
+        // future read-modify-write of an unrelated field doesn't drop the configured connectors.
+        encoded.contains("\"connectors\"") shouldBe true
+    }
+
+    @Test
+    fun `connectors map round-trips and is keyed by ConnectorId idString`() {
+        val connectorId = ConnectorId(
+            type = ConnectorType.OCTISERVER,
+            subtype = "prod.kserver.octi.darken.eu",
+            account = "11111111-2222-3333-4444-555555555555",
+        )
+        val original = SettingsData(
+            deviceId = "abc",
+            connectors = mapOf(connectorId.idString to ConnectorConfig(connectorId = connectorId)),
+        )
+        val encoded = json.encodeToString(SettingsData.serializer(), original)
+        // The opaque idString is the map key — assert it's present verbatim so a future change
+        // to ConnectorId.idString shape is visible here.
+        encoded.contains("\"kserver-prod.kserver.octi.darken.eu-11111111-2222-3333-4444-555555555555\"") shouldBe true
+        val decoded = json.decodeFromString(SettingsData.serializer(), encoded)
+        decoded shouldBe original
     }
 }

@@ -4,6 +4,7 @@ import eu.darken.octi.desktop.common.files.AtomicWrites
 import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
 import eu.darken.octi.desktop.platform.PlatformDetector
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.ui.dashboard.layout.TileLayoutConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -81,7 +82,7 @@ class Settings private constructor(
 
     companion object {
 
-        private const val SCHEMA_VERSION = 1
+        private const val SCHEMA_VERSION = 2
 
         fun load(
             json: Json = defaultJson,
@@ -126,7 +127,7 @@ class Settings private constructor(
 
 @Serializable
 data class SettingsData(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     /**
      * Persistent UUID identifying this desktop install to the Octi server. Minted on first
      * launch (see [Settings.load]) and never rotated — re-linking against a different account
@@ -139,9 +140,10 @@ data class SettingsData(
      * User-configured server URL used by the "Create new account" flow. Null or blank means the
      * production server is used. Values are pre-validated by `OctiServer.Address.tryParse` before
      * being persisted — bad URLs never reach this field. After a successful create or link the
-     * server lives in the credentials and this field is unused (UI shows it read-only).
+     * server lives in the per-connector credentials and this field is just the UI prefill for
+     * the next create-account attempt.
      */
-    val customServerUrl: String? = null,
+    val createAccountServerUrl: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val syncIntervalSeconds: Int = 300,
     /** Clipboard auto-sync is opt-in for privacy reasons. See plan for rationale. */
@@ -155,9 +157,32 @@ data class SettingsData(
     /**
      * Per-device tile-layout overrides keyed by `DeviceId.id`. Empty by default. Pruned in the
      * dashboard whenever a device leaves the peer list (gated on a successful load so a
-     * transient empty `devices` emission doesn't wipe every saved entry).
+     * transient empty `devices` emission doesn't wipe every saved entry). The deviceId is
+     * stable across connectors (Android merges by deviceId too) so this map is shared.
      */
     val tileLayouts: Map<String, TileLayoutConfig> = emptyMap(),
+    /**
+     * Configured sync connectors. Keys are [ConnectorId.idString] — opaque keys that are
+     * comparable but not parsed; the structured [ConnectorId] lives inside [ConnectorConfig].
+     * One entry per linked account. Today only OctiServer entries exist; a future GDrive
+     * connector adds entries with `type = GDRIVE` without a schema migration.
+     *
+     * This map is the discovery index for [eu.darken.octi.desktop.linking.CredentialsStore] —
+     * the keystore has no list-by-prefix across backends, so "which connectors exist" lives
+     * here and the keystore is value storage keyed by [ConnectorId.idString].
+     */
+    val connectors: Map<String, ConnectorConfig> = emptyMap(),
+)
+
+/**
+ * Per-connector configuration persisted in [SettingsData.connectors]. The structured
+ * [connectorId] is stored alongside the map key (which is [ConnectorId.idString]) so consumers
+ * never have to parse the idString — its `-` separator collides with hyphens inside hostnames
+ * and UUIDs. Future per-connector knobs (e.g. polling intervals, mute flags) land here.
+ */
+@Serializable
+data class ConnectorConfig(
+    val connectorId: ConnectorId,
 )
 
 @Serializable

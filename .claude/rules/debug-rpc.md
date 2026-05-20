@@ -54,20 +54,37 @@ All authenticated calls require header `X-Debug-Token: <value>`.
   "version": "0.1.0-dev",
   "deviceId": "...",
   "screen": "dashboard",              // or "linking", "settings", "device:<id>", "files:<id>", "clipboard"
-  "activeClientPresent": true,         // credentials configured (NOT == "connected")
-  "webSocketState": "Connected",       // Idle | Connecting | Connected | Reconnecting | PollingFallback
-  "deviceListLoadState": "Ok",         // Initial | Loading | Ok | Idle | Error
+  "connectors": [                     // 0-or-1 entries today; array shape is multi-connector ready
+    {
+      "id": "kserver-prod.kserver.octi.darken.eu-<uuid>",
+      "type": "octiserver",
+      "webSocketState": "Connected",  // Idle | Connecting | Connected | Reconnecting | PollingFallback
+      "deviceListLoadState": "Ok"     // Loading | Ok | Error
+    }
+  ],
   "deviceCount": 2,
   "knownDevices": [
-    {"deviceId": "...", "label": "blasphemy", "platform": "desktop-linux", "lastSeen": "..."},
-    {"deviceId": "...", "label": "Pixel 8", "platform": "android", "lastSeen": "..."}
+    {"deviceId": "...", "label": "blasphemy", "platform": "desktop-linux", "lastSeen": "...",
+     "capabilities": [...], "sources": ["kserver-prod.kserver.octi.darken.eu-<uuid>"]},
+    {"deviceId": "...", "label": "Pixel 8",   "platform": "android",       "lastSeen": "...",
+     "capabilities": [...], "sources": ["kserver-prod.kserver.octi.darken.eu-<uuid>"]}
   ],
   "lastMetaWriteSuccessAt": "...",     // null until our first /v1/module/.../meta write succeeds
   "lastWsEventAt": null                // null until the first inbound WS event arrives
 }
 ```
 
-Important: `activeClientPresent == true` means we have credentials and a client object — it does NOT mean the WebSocket is currently connected. Check `webSocketState` for that.
+Notes:
+
+- "is anything linked?" → `connectors.length > 0`. (Replaces the old `activeClientPresent` flag.)
+- "is the WebSocket up?" → per-connector — check the matching `webSocketState`. A connector
+  being present does NOT mean the WebSocket is connected.
+- `sources` on each device entry tells you which connector(s) reported that peer. Today every
+  device has exactly one source; when GDrive support lands, peers visible across multiple
+  connectors will list all of them.
+- `capabilities` preserves the null-vs-empty distinction: `null` means "peer hasn't reported a
+  capability set"; `[]` means "peer explicitly reports an empty set". The capability authority
+  semantics depend on this.
 
 ## Built-in actions
 
@@ -75,7 +92,7 @@ Important: `activeClientPresent == true` means we have credentials and a client 
 dashboard.refresh            — kick the device-list poll loop now
 navigation.go                — jump to "linking" | "dashboard" | "clipboard" | "settings" | "files" (with deviceId)
 linking.submit               — submit a share code as if pasted on the Linking screen
-account.unlink               — clear credentials locally and return to the Linking screen
+account.unlink               — unlink the primary connector (server DELETE + clear local creds + settings entry)
 settings.themeMode           — override the theme (SYSTEM | LIGHT | DARK); used by screenshot CI
 ```
 

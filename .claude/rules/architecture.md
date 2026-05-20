@@ -30,22 +30,41 @@ Manual factory pattern in `di/AppGraph.kt`. No Hilt — Hilt is Android-only.
 
 - `AppGraph.create(passphrasePrompt)` is called once from `Main`.
 - The graph is threaded down through Compose via `LocalAppGraph` (a `CompositionLocal`).
-- Lazy properties for components that depend on `activeClient` (e.g. `webSocketClient`, `metaWriter`, `fileShareRepo`) — wired only on first access, so the graph constructs even when `activeClient` is still null (pre-link state).
+- Lazy properties for components that depend on `activeConnectors` (e.g. `webSocketClient`, `metaWriter`, `fileShareRepo`) — wired only on first access, so the graph constructs even when the connector list is still empty (pre-link state).
 - The graph also owns the `DebugActionRegistry` — see [debug-rpc.md](debug-rpc.md).
 
 ## Sync state machine
 
 Two top-level states, both modelled explicitly on the graph:
 
-- **Pre-link**: `activeClient` is null; navigator starts at `Screen.Linking`.
-- **Post-link**: `activeClient` is non-null; navigator starts at `Screen.Dashboard`.
+- **Pre-link**: `activeConnectors` is empty; navigator starts at `Screen.Linking`.
+- **Post-link**: `activeConnectors` has at least one entry; navigator starts at `Screen.Dashboard`.
 
 Transitions:
 
-- `AppGraph.onLinked()` is called after a successful `POST /v1/account?share=...`. It loads credentials, builds a fresh `OctiServerHttpClient`, swaps `_activeClient.value`, and navigates to `Dashboard`.
-- `AppGraph.unlink()` clears credentials locally (does NOT call the server's `DELETE /v1/devices/{self}` — leave that to the Settings screen).
+- `AppGraph.onLinked(connectorId, credentials)` is called by the Link/Create flow on success. The two-store commit (keystore + `SettingsData.connectors`) is done by `LinkController` BEFORE `onLinked` runs; `onLinked` is purely in-memory (build the `OctiServerConnector`, append to `_activeConnectors`, navigate). See [linking-flow](#linking-flow) below.
+- `AppGraph.unlink(connectorId)` issues server `DELETE /v1/devices/{self}` first, then clears the matching keystore entry AND the `SettingsData.connectors` entry. Network failure keeps local state untouched so the user can retry.
 
-The previous client is `close()`-d on every transition rather than mutating config in place. Avoids stale auth state on the Ktor connection pool.
+Each connector owns its `OctiServerHttpClient`; relink rebuilds rather than mutating in place (avoids stale auth state on the Ktor connection pool).
+
+### Per-connector storage model
+
+Multi-connector-ready shapes are baked in from the start (single OctiServer connector today; a future GDrive connector slots in without migrations):
+
+- **`Settings.connectors: Map<String, ConnectorConfig>`** — discovery index keyed by `ConnectorId.idString`. The structured `ConnectorId` lives in `ConnectorConfig.connectorId`; the map key is opaque (don't parse it — `-` separator collides with hyphens in hostnames/UUIDs).
+- **Keystore key** — `"${DesktopIdentity.credentialsKeyPrefix}.${connectorId.idString}"`. The channel-aware prefix prevents canary↔stable cross-channel reads; the full `idString` suffix prevents UUID collisions between custom OctiServer instances.
+- **`DeviceListCache`** — `{schemaVersion, perConnector: Map<idString, List<Device>>}`. Load filters by `Settings.connectors` so a stale cache can't resurrect ghost devices after unlink.
+- **`OctiServerConnector`** — bundles `(identifier, credentials, client)` so consumers never split-fetch the http client and credentials separately. Lifetime tied to the credentials.
+
+### Linking flow
+
+`LinkController.link` / `createAccount` orchestrate the two-store commit:
+
+1. Validate input (local-only).
+2. Server consume (`register` / `createAccount`).
+3. Save credentials to keystore. On failure → rollback DELETE on server.
+4. Add `ConnectorConfig` entry to `Settings.connectors`. On failure → best-effort delete keystore entry + rollback DELETE on server, surface as `SettingsPersistFailedRolledBack`.
+5. Return `Success(connectorId, credentials)`. The ViewModel passes both to `AppGraph.onLinked(...)`.
 
 ## Wire types — copied, not shared
 
@@ -65,7 +84,7 @@ Compose-Navigation3 is Android-only — we use a plain `MutableStateFlow<Screen>
 
 ## WebSocket lifecycle
 
-`OctiServerWebSocketClient` owns one supervisory coroutine bound to `AppGraph.appScope`. It runs only while `AppGraph.activeClient` is non-null; `flatMapLatest` over the active client transitions tears down the prior loop cleanly. State machine: `Idle → Connecting → Connected → (Reconnecting | PollingFallback)`. Backoff is jittered exponential `min(60s, 2^n * 1s) ± 25%`.
+`OctiServerWebSocketClient` owns one supervisory coroutine per active connector, all bound to `AppGraph.appScope`. Per-connector state is exposed via `statesByConnector: StateFlow<Map<ConnectorId, ConnectionState>>`; the back-compat aggregate `state` reflects the primary connector. Set deltas on `activeConnectors` create/cancel per-connector loops. State machine: `Idle → Connecting → Connected → (Reconnecting | PollingFallback)`. Backoff is jittered exponential `min(60s, 2^n * 1s) ± 25%`.
 
 ## File sharing — GCM-SIV only
 
@@ -81,6 +100,7 @@ Tink's streaming AEAD (`StreamingPayloadCipher`) is GCM-SIV-only on both `tink-j
 - Compose Navigation3 (Android-only)
 - Hilt (Android-only)
 - Power / WiFi / Apps / Connectivity collection on desktop (deferred — needs per-OS CLI parsing)
-- Google Drive sync connector (Phase H+)
-- Multi-account support (single-account MVP)
+- Google Drive sync connector — wire shapes (`SettingsData.connectors`, `DeviceListCache.perConnector`, debug RPC `connectors[]`) are multi-connector-ready; needs the second `SyncConnector`-shaped impl and a hub-style registry
+- Multi-account UI — the storage model supports it (keystore + `Settings.connectors` are keyed by full `ConnectorId.idString`); the link/unlink flow currently still operates on `primaryConnector` only
+- Per-module merging (Android's `latestData()` groups by deviceId × moduleId and picks newest `modifiedAt`) — desktop merges at device level today via `MergedDevice`
 - jpackage packaging (Phase H)

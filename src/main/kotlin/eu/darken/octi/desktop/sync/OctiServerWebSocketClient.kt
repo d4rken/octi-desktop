@@ -6,9 +6,10 @@ import eu.darken.octi.desktop.common.log.Logging.Priority.WARN
 import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
 import eu.darken.octi.desktop.di.AppGraph
-import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.octiserver.ws.EventPayload
 import eu.darken.octi.desktop.protocol.serialization.Serialization
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
@@ -16,16 +17,18 @@ import io.ktor.websocket.close
 import io.ktor.websocket.readReason
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -38,9 +41,10 @@ import kotlin.time.Duration.Companion.seconds
 private val TAG = logTag("Sync", "WebSocket")
 
 /**
- * WebSocket client for `/v1/ws`. Owns a single supervisory coroutine bound to [AppGraph.appScope].
+ * WebSocket client for `/v1/ws`. Owns one supervisory coroutine per active connector, all
+ * bound to [AppGraph.appScope].
  *
- * State machine:
+ * State machine per connector:
  *
  * ```
  *      Idle ──start()──▶ Connecting ──open ok──▶ Connected ──frame──▶ (emit to bus)
@@ -54,13 +58,15 @@ private val TAG = logTag("Sync", "WebSocket")
  * ```
  *
  * - **Backoff**: jittered exponential `min(60s, 2^attempt * 1s) + ±25% jitter`.
- * - **Polling fallback**: after [MAX_BACKOFF_ATTEMPTS] consecutive failures, we stop trying.
- *   `DeviceListRepo`'s periodic poll is the recovery path; [retry] allows manual WS retry.
+ * - **Polling fallback**: after [MAX_BACKOFF_ATTEMPTS] consecutive failures on a connector,
+ *   we stop trying for that connector. [DeviceListRepo]'s periodic poll is the recovery path;
+ *   [retry] allows a manual WS retry.
  * - **Self-suppression**: events whose `sourceDeviceId == ownDeviceId` are dropped before
  *   reaching the bus (Codex review #5 wire detail).
  *
- * The whole loop is restarted when [AppGraph.activeClient] transitions — flatMapLatest tears
- * down the prior loop cleanly so we never run two WS sessions for two clients in parallel.
+ * The whole multi-connector loop set is restarted when [AppGraph.activeConnectors]
+ * transitions — set deltas drive create/cancel. Today the set is always 0-or-1; the code is
+ * written for n so a future GDrive connector slots in cleanly.
  */
 class OctiServerWebSocketClient(
     private val graph: AppGraph,
@@ -75,49 +81,83 @@ class OctiServerWebSocketClient(
         data object PollingFallback : ConnectionState()
     }
 
-    private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
-    val state: StateFlow<ConnectionState> = _state.asStateFlow()
+    private val _statesByConnector = MutableStateFlow<Map<ConnectorId, ConnectionState>>(emptyMap())
 
-    private val retrySignal = MutableStateFlow(0)
+    /** Per-connector connection state. Empty when no connectors are active. */
+    val statesByConnector: StateFlow<Map<ConnectorId, ConnectionState>> = _statesByConnector.asStateFlow()
+
+    /**
+     * Aggregate state view for back-compat with the dashboard/debug single-connector callers.
+     * Today the value is always `statesByConnector[primaryConnector] ?: Idle`; when a second
+     * connector lands, callers that care about per-connector detail switch to
+     * [statesByConnector] — the dashboard polling-fallback gate will need a rule like "any
+     * connector in PollingFallback" rather than "the only one is".
+     */
+    val state: StateFlow<ConnectionState> = graph.primaryConnector
+        .map { primary ->
+            primary?.let { _statesByConnector.value[it.identifier] } ?: ConnectionState.Idle
+        }
+        .stateIn(graph.appScope, SharingStarted.Eagerly, ConnectionState.Idle)
+
+    private val retrySignals = MutableStateFlow<Map<ConnectorId, Int>>(emptyMap())
     private val lifecycleLock = Mutex()
-    private var lifecycleJob: Job? = null
+    private var lifecycleJobs: MutableMap<ConnectorId, Job> = mutableMapOf()
 
     fun start() {
-        graph.activeClient
-            .onEach { client ->
+        graph.activeConnectors
+            .onEach { connectors ->
                 lifecycleLock.withLock {
-                    lifecycleJob?.cancel()
-                    lifecycleJob = if (client != null) {
-                        graph.appScope.launch { runLoop(client) }
-                    } else {
-                        _state.value = ConnectionState.Idle
-                        null
+                    val active = connectors.associateBy { it.identifier }
+                    // Cancel loops for connectors that left the active set.
+                    val removed = lifecycleJobs.keys - active.keys
+                    for (id in removed) {
+                        lifecycleJobs.remove(id)?.cancel()
+                        _statesByConnector.update { it - id }
+                    }
+                    // Start loops for newly active connectors.
+                    for ((id, connector) in active) {
+                        if (id in lifecycleJobs) continue
+                        lifecycleJobs[id] = graph.appScope.launch { runLoop(connector) }
                     }
                 }
             }
             .launchIn(graph.appScope)
     }
 
-    /** Manual nudge out of [ConnectionState.PollingFallback] to retry the WS connect. */
-    fun retry() {
-        retrySignal.value++
+    /**
+     * Manual nudge out of [ConnectionState.PollingFallback] to retry the WS connect. If
+     * [connectorId] is null, retries every connector currently in PollingFallback. Today the
+     * UI only ever has one connector to nudge, but the parameterized form keeps the call site
+     * shape stable when GDrive lands.
+     */
+    fun retry(connectorId: ConnectorId? = null) {
+        retrySignals.update { map ->
+            if (connectorId == null) {
+                // Bump every connector's signal — the runLoop only awaits its own counter.
+                map + _statesByConnector.value.keys.associateWith { (map[it] ?: 0) + 1 }
+            } else {
+                map + (connectorId to (map[connectorId] ?: 0) + 1)
+            }
+        }
     }
 
-    private suspend fun runLoop(client: OctiServerHttpClient) {
+    private suspend fun runLoop(connector: OctiServerConnector) {
+        val id = connector.identifier
+        val client = connector.client
         var consecutiveFailures = 0
         while (true) {
-            _state.value = ConnectionState.Connecting
-            log(TAG, INFO) { "Opening WebSocket session (attempt=${consecutiveFailures + 1})" }
+            _statesByConnector.update { it + (id to ConnectionState.Connecting) }
+            log(TAG, INFO) { "[${id.logLabel}] Opening WebSocket session (attempt=${consecutiveFailures + 1})" }
             val sessionOk = try {
                 val session = client.openWebSocketSession()
                 consecutiveFailures = 0
-                _state.value = ConnectionState.Connected
+                _statesByConnector.update { it + (id to ConnectionState.Connected) }
                 consume(session)
                 true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                log(TAG, WARN, e) { "WebSocket session ended unexpectedly" }
+                log(TAG, WARN, e) { "[${id.logLabel}] WebSocket session ended unexpectedly" }
                 false
             }
 
@@ -131,17 +171,17 @@ class OctiServerWebSocketClient(
 
             consecutiveFailures++
             if (consecutiveFailures >= MAX_BACKOFF_ATTEMPTS) {
-                _state.value = ConnectionState.PollingFallback
+                _statesByConnector.update { it + (id to ConnectionState.PollingFallback) }
                 log(TAG, WARN) {
-                    "WebSocket reconnect failed $MAX_BACKOFF_ATTEMPTS times in a row — falling back to REST polling"
+                    "[${id.logLabel}] WebSocket reconnect failed $MAX_BACKOFF_ATTEMPTS times in a row — falling back to REST polling"
                 }
-                awaitRetrySignal()
+                awaitRetrySignal(id)
                 consecutiveFailures = 0
                 continue
             }
             val nextDelay = backoffDelay(consecutiveFailures - 1)
-            _state.value = ConnectionState.Reconnecting(consecutiveFailures, nextDelay)
-            log(TAG, DEBUG) { "Backing off ${nextDelay.inWholeMilliseconds}ms before next WebSocket attempt" }
+            _statesByConnector.update { it + (id to ConnectionState.Reconnecting(consecutiveFailures, nextDelay)) }
+            log(TAG, DEBUG) { "[${id.logLabel}] Backing off ${nextDelay.inWholeMilliseconds}ms before next WebSocket attempt" }
             delay(nextDelay)
         }
     }
@@ -192,10 +232,14 @@ class OctiServerWebSocketClient(
         }
     }
 
-    private suspend fun awaitRetrySignal() {
-        val before = retrySignal.value
-        // Suspend until retry() bumps the counter.
-        retrySignal.first { it != before }
+    private suspend fun awaitRetrySignal(id: ConnectorId) {
+        val before = retrySignals.value[id] ?: 0
+        // Suspend until retry() bumps THIS connector's counter.
+        retrySignals.first { (it[id] ?: 0) != before }
+    }
+
+    private fun <K, V> MutableStateFlow<Map<K, V>>.update(transform: (Map<K, V>) -> Map<K, V>) {
+        value = transform(value)
     }
 
     companion object {
@@ -218,4 +262,3 @@ class OctiServerWebSocketClient(
         }
     }
 }
-

@@ -14,7 +14,8 @@ import eu.darken.octi.desktop.modules.files.FileShareRepo
 import eu.darken.octi.desktop.modules.meta.DeviceMetadataProvider
 import eu.darken.octi.desktop.modules.meta.MetaWriter
 import eu.darken.octi.desktop.protocol.octiserver.OctiServer
-import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.storage.Settings
 import eu.darken.octi.desktop.storage.keystore.Keystore
@@ -27,8 +28,11 @@ import eu.darken.octi.desktop.ui.dashboard.DashboardModuleRepo
 import eu.darken.octi.desktop.ui.nav.Navigator
 import eu.darken.octi.desktop.ui.nav.Screen
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -41,12 +45,17 @@ private val TAG = logTag("AppGraph")
  * into Compose via a CompositionLocal in the UI tree.
  *
  * The graph models the two top-level app states explicitly:
- * - Pre-link: [activeClient] is null, navigator starts at [Screen.Linking].
- * - Post-link: [activeClient] is non-null; navigator starts at [Screen.Dashboard].
+ * - Pre-link: [activeConnectors] is empty, navigator starts at [Screen.Linking].
+ * - Post-link: [activeConnectors] is non-empty; navigator starts at [Screen.Dashboard].
  *
- * Linking and unlinking flip [activeClient] via [onLinked] / [unlink]. The current client owns
- * its own Ktor HttpClient; we close + replace it on each transition rather than mutating
- * config in place (avoids stale auth state on the Ktor connection pool).
+ * Linking and unlinking mutate [activeConnectors] via [onLinked] / [unlink]. Each connector
+ * owns its own Ktor HttpClient via the wrapping [OctiServerConnector]; on unlink the connector
+ * is removed and its `close()` tears the client down.
+ *
+ * Multi-connector ready: [activeConnectors] is a list, [primaryConnector] is a derived helper
+ * for the (today 0-or-1) common case. When a second connector type lands (GDrive) only the
+ * sync-layer collectors that iterate connectors change shape; the list-based plumbing is
+ * already in place.
  *
  * The passphrase prompt for the keystore fallback is wired here too — it's invoked lazily by
  * [KeystoreFactory] only when no OS keystore is available.
@@ -59,16 +68,26 @@ class AppGraph private constructor(
     val deviceId: DeviceId,
     val linkController: LinkController,
     val navigator: Navigator,
-    private val initialCredentials: OctiServer.Credentials?,
+    initialConnectors: List<OctiServerConnector>,
 ) {
 
-    private val _activeClient = MutableStateFlow<OctiServerHttpClient?>(null)
-    val activeClient: StateFlow<OctiServerHttpClient?> = _activeClient.asStateFlow()
+    private val _activeConnectors = MutableStateFlow(initialConnectors)
+    val activeConnectors: StateFlow<List<OctiServerConnector>> = _activeConnectors.asStateFlow()
 
     /**
-     * Created eagerly so its `activeClient.flatMapLatest` collector is wired before any UI
-     * subscribes. Constructed lazily — the constructor reads [activeClient], which must be
-     * initialized first. Property-order matters: keep this below the [_activeClient] field.
+     * Convenience for the common case of "the only OctiServer connector". Today every consumer
+     * reads this; the explicit `firstOrNull` semantics keep the single-vs-many distinction
+     * visible in the type. When the desktop ever surfaces a multi-account UI, consumers move
+     * to [activeConnectors] iteration.
+     */
+    val primaryConnector: StateFlow<OctiServerConnector?> = activeConnectors
+        .map { it.firstOrNull() }
+        .stateIn(appScope, SharingStarted.Eagerly, initialConnectors.firstOrNull())
+
+    /**
+     * Created eagerly so its [activeConnectors] collector is wired before any UI subscribes.
+     * Constructed lazily — the constructor reads [activeConnectors], which must be initialized
+     * first. Property-order matters: keep these below the [_activeConnectors] field.
      */
     val syncEventBus: SyncEventBus = SyncEventBus()
     val deviceListRepo: DeviceListRepo by lazy { DeviceListRepo(this) }
@@ -89,26 +108,37 @@ class AppGraph private constructor(
     val debugActions: DebugActionRegistry = DebugActionRegistry()
 
     init {
-        if (initialCredentials != null) {
-            _activeClient.value = buildClient(initialCredentials)
+        if (initialConnectors.isNotEmpty()) {
             log(TAG, Logging.Priority.INFO) {
-                "Booted with stored credentials for account=${initialCredentials.accountId.id.take(8)}... " +
-                    "keysetMode=${initialCredentials.encryptionKeyset.type}"
+                "Booted with ${initialConnectors.size} connector(s): " +
+                    initialConnectors.joinToString { it.identifier.idString }
             }
         } else {
-            log(TAG, Logging.Priority.INFO) { "No stored credentials; starting in Linking flow" }
+            log(TAG, Logging.Priority.INFO) { "No stored connectors; starting in Linking flow" }
         }
     }
 
-    /** Called by the Link flow on [LinkResult.Success] to swap in a fresh authenticated client. */
-    fun onLinked() {
-        val credentials = credentialsStore.load()
-        if (credentials == null) {
-            log(TAG, Logging.Priority.WARN) { "onLinked() called but no credentials found in store" }
-            return
+    /**
+     * Called by the Link flow on [LinkResult.Success]. [LinkController] has already committed
+     * the keystore entry AND the [Settings] discovery entry; this is purely in-memory state
+     * mutation: build the connector and add it to [activeConnectors].
+     */
+    fun onLinked(connectorId: ConnectorId, credentials: OctiServer.Credentials) {
+        val metadata = DeviceMetadataProvider.current(userLabel = settings.data.deviceLabel)
+        val connector = OctiServerConnector.fromCredentials(
+            deviceId = deviceId,
+            deviceMetadata = metadata,
+            credentials = credentials,
+        )
+        // Replace any pre-existing connector with the same identifier (e.g. relink after a
+        // crashed previous unlink) — close the old client to free the connection pool.
+        _activeConnectors.update { existing ->
+            existing.firstOrNull { it.identifier == connectorId }?.let {
+                runCatching { it.close() }
+                    .onFailure { e -> log(TAG, Logging.Priority.WARN, e) { "Old connector close() failed" } }
+            }
+            existing.filterNot { it.identifier == connectorId } + connector
         }
-        _activeClient.value?.close()
-        _activeClient.value = buildClient(credentials)
         navigator.navigateTo(Screen.Dashboard, clearStack = true)
     }
 
@@ -167,7 +197,7 @@ class AppGraph private constructor(
         ) { params ->
             val code = params["code"]?.jsonPrimitive?.content ?: error("missing code")
             val result = linkController.link(code, deviceId)
-            if (result == LinkResult.Success) onLinked()
+            if (result is LinkResult.Success) onLinked(result.connectorId, result.credentials)
             buildJsonObject {
                 put("result", JsonPrimitive(result::class.simpleName ?: "Unknown"))
             }
@@ -176,11 +206,13 @@ class AppGraph private constructor(
         debugActions.registerUiAction(
             DebugActionRegistry.Metadata(
                 name = "account.unlink",
-                description = "Unlink: calls DELETE /v1/devices/{self} then clears local credentials. " +
-                    "Returns the UnlinkResult variant name so callers can branch on Success / NetworkError.",
+                description = "Unlink the primary connector: calls DELETE /v1/devices/{self} then " +
+                    "clears local credentials + settings entry. Returns the UnlinkResult variant " +
+                    "name so callers can branch on Success / NetworkError.",
             ),
         ) {
-            val result = unlink()
+            val target = primaryConnector.value?.identifier
+            val result = if (target == null) UnlinkResult.NotLinked else unlink(target)
             buildJsonObject {
                 put("result", JsonPrimitive(result::class.simpleName ?: "Unknown"))
             }
@@ -217,54 +249,65 @@ class AppGraph private constructor(
     }
 
     /**
-     * Tear down the active session. The server call and local cleanup are isolated so a local
-     * mishap after a confirmed server delete (file lock, navigator state, etc.) does not get
-     * reported as a network failure — `deleteDevice()` succeeding is the commit point. If the
-     * server call itself fails we keep local state untouched and surface
+     * Tear down [connectorId]'s session. The server call and local cleanup are isolated so a
+     * local mishap after a confirmed server delete (file lock, navigator state, etc.) does not
+     * get reported as a network failure — `deleteDevice()` succeeding is the commit point. If
+     * the server call itself fails we keep local state untouched and surface
      * [UnlinkResult.NetworkError] so the user can retry. Returns [UnlinkResult.NotLinked] when
-     * nothing is linked.
+     * the connector is unknown.
      */
-    suspend fun unlink(): UnlinkResult {
-        val active = _activeClient.value ?: return UnlinkResult.NotLinked
+    suspend fun unlink(connectorId: ConnectorId): UnlinkResult {
+        val connector = _activeConnectors.value.firstOrNull { it.identifier == connectorId }
+            ?: return UnlinkResult.NotLinked
         try {
-            active.deleteDevice(deviceId)
+            connector.client.deleteDevice(deviceId)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (cause: Throwable) {
-            log(TAG, Logging.Priority.WARN, cause) { "Unlink server call failed; keeping local credentials" }
+            log(TAG, Logging.Priority.WARN, cause) { "Unlink server call failed; keeping local state" }
             return UnlinkResult.NetworkError(cause)
         }
         // Past this point the server already removed the device. Closing the client and the
         // navigation step are best-effort — they don't affect on-disk durability — but
-        // credentialsStore.clear() is the durable local-unlink commit: if it fails, the next
-        // app launch will reload stale credentials and try to talk to a deleted server-side
-        // device. Surface that distinctly via LocalCleanupFailed so the UI can warn loudly.
-        log(TAG, Logging.Priority.INFO) { "Server DELETE /v1/devices/{self} succeeded; clearing local state" }
-        runCatching { active.close() }
+        // credentialsStore.clear() + settings.update are the durable local-unlink commits: if
+        // either fails, the next app launch will reload stale state and try to talk to a
+        // deleted server-side device. Surface that distinctly via LocalCleanupFailed so the UI
+        // can warn loudly.
+        log(TAG, Logging.Priority.INFO) {
+            "Server DELETE /v1/devices/{self} succeeded for connector=${connectorId.idString}; clearing local state"
+        }
+        runCatching { connector.close() }
             .onFailure { log(TAG, Logging.Priority.WARN, it) { "Client close failed after successful unlink" } }
-        _activeClient.value = null
-        val clearOutcome = runCatching { credentialsStore.clear() }
+        _activeConnectors.update { existing -> existing.filterNot { it.identifier == connectorId } }
+        val clearOutcome = runCatching { credentialsStore.clear(connectorId) }
         clearOutcome.onFailure { cause ->
             log(TAG, Logging.Priority.ERROR, cause) {
                 "Credentials clear FAILED after successful server delete — local state is now stale"
             }
         }
-        runCatching { navigator.navigateTo(Screen.Linking, clearStack = true) }
-            .onFailure { log(TAG, Logging.Priority.WARN, it) { "Navigation to Linking failed after successful unlink" } }
-        return clearOutcome.fold(
-            onSuccess = { UnlinkResult.Success },
-            onFailure = { UnlinkResult.LocalCleanupFailed(it) },
-        )
+        val settingsOutcome = runCatching {
+            settings.update { current ->
+                current.copy(connectors = current.connectors - connectorId.idString)
+            }
+        }
+        settingsOutcome.onFailure { cause ->
+            log(TAG, Logging.Priority.ERROR, cause) {
+                "Settings.connectors update FAILED after successful server delete — discovery entry is stale"
+            }
+        }
+        if (_activeConnectors.value.isEmpty()) {
+            runCatching { navigator.navigateTo(Screen.Linking, clearStack = true) }
+                .onFailure { log(TAG, Logging.Priority.WARN, it) { "Navigation to Linking failed after successful unlink" } }
+        }
+        val firstFailure = clearOutcome.exceptionOrNull() ?: settingsOutcome.exceptionOrNull()
+        return if (firstFailure == null) UnlinkResult.Success
+        else UnlinkResult.LocalCleanupFailed(firstFailure)
     }
 
-    private fun buildClient(credentials: OctiServer.Credentials): OctiServerHttpClient {
-        val metadata = DeviceMetadataProvider.current(userLabel = settings.data.deviceLabel)
-        return OctiServerHttpClient(
-            address = credentials.serverAdress,
-            deviceId = deviceId,
-            deviceMetadata = metadata,
-            credentials = credentials,
-        )
+    private fun MutableStateFlow<List<OctiServerConnector>>.update(
+        transform: (List<OctiServerConnector>) -> List<OctiServerConnector>,
+    ) {
+        value = transform(value)
     }
 
     companion object {
@@ -293,10 +336,44 @@ class AppGraph private constructor(
                     DeviceMetadataProvider.current(userLabel = settings.data.deviceLabel)
                 },
                 credentialsStore = credentialsStore,
+                settings = settings,
             )
 
-            val storedCredentials = credentialsStore.load()
-            val startScreen = if (storedCredentials != null) Screen.Dashboard else Screen.Linking
+            // Load all configured connectors from the discovery index. Each must have a matching
+            // keystore entry — if it doesn't (race with a partially-rolled-back link, manual
+            // keystore wipe, etc.) we drop it from the in-memory list AND clean up the orphan
+            // settings entry so the next save round doesn't carry a ghost.
+            val initialConnectors = mutableListOf<OctiServerConnector>()
+            val orphanIds = mutableListOf<ConnectorId>()
+            val metadata = DeviceMetadataProvider.current(userLabel = settings.data.deviceLabel)
+            for (config in settings.data.connectors.values) {
+                val creds = credentialsStore.load(config.connectorId)
+                if (creds == null) {
+                    log(TAG, Logging.Priority.WARN) {
+                        "settings.connectors lists ${config.connectorId.idString} but keystore has no entry — dropping orphan"
+                    }
+                    orphanIds += config.connectorId
+                    continue
+                }
+                initialConnectors += OctiServerConnector.fromCredentials(
+                    deviceId = deviceId,
+                    deviceMetadata = metadata,
+                    credentials = creds,
+                )
+            }
+            if (orphanIds.isNotEmpty()) {
+                runCatching {
+                    settings.update { current ->
+                        current.copy(connectors = current.connectors - orphanIds.map { it.idString }.toSet())
+                    }
+                }.onFailure {
+                    log(TAG, Logging.Priority.WARN, it) {
+                        "Failed to prune orphan connector entries from settings; will retry next boot"
+                    }
+                }
+            }
+
+            val startScreen = if (initialConnectors.isNotEmpty()) Screen.Dashboard else Screen.Linking
             val navigator = Navigator(initial = startScreen)
 
             val graph = AppGraph(
@@ -307,7 +384,7 @@ class AppGraph private constructor(
                 deviceId = deviceId,
                 linkController = linkController,
                 navigator = navigator,
-                initialCredentials = storedCredentials,
+                initialConnectors = initialConnectors,
             )
             graph.registerDebugActions()
             return graph

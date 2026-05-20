@@ -35,7 +35,7 @@ log(TAG, ERROR, e) { "Failed: ${e.message}" }
 
 - `MutableStateFlow<T>` for observable single-value state. `StateFlow<T>` for the read-only view.
 - `MutableSharedFlow<T>` for event streams (no replay, small bounded buffer).
-- `flatMapLatest` to switch between sub-flows when an upstream changes (e.g. `activeClient` → per-client polling loop).
+- `flatMapLatest` to switch between sub-flows when an upstream changes (e.g. `activeConnectors` → per-connector polling loop).
 - `launchIn(graph.appScope)` to attach a flow to the app lifetime.
 
 ## Coroutine scopes

@@ -94,7 +94,7 @@ class ClipboardSync(private val graph: AppGraph) {
         // Outbound poll loop.
         graph.appScope.launch {
             while (true) {
-                if (graph.settings.data.clipboardAutoSync && graph.activeClient.value != null) {
+                if (graph.settings.data.clipboardAutoSync && graph.primaryConnector.value != null) {
                     runCatching { tryPushLocalClipboard() }
                         .onFailure { log(TAG, WARN, it) { "Outbound clipboard push failed" } }
                 }
@@ -125,9 +125,9 @@ class ClipboardSync(private val graph: AppGraph) {
         // peer just sent us (which we applied locally moments ago).
         if (hash == lastPushedHash || hash == lastAppliedHash) return
 
-        val client = graph.activeClient.value ?: return
-        val credentials = graph.credentialsStore.load() ?: return
-        val crypto = PayloadEncryption(keySet = credentials.encryptionKeyset)
+        val connector = graph.primaryConnector.value ?: return
+        val client = connector.client
+        val crypto = PayloadEncryption(keySet = connector.credentials.encryptionKeyset)
         val info = ClipboardInfo(type = ClipboardInfo.Type.SIMPLE_TEXT, data = bytes.toByteString())
         val plaintext = Serialization.json.encodeToString(ClipboardInfo.serializer(), info)
             .toByteArray(Charsets.UTF_8)

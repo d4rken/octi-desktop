@@ -65,8 +65,9 @@ class BlobUploader(private val graph: AppGraph) {
         blobKey: String,
         sourceFile: Path,
     ): Result {
-        val client = graph.activeClient.value ?: return Result.NoClient
-        val credentials = graph.credentialsStore.load() ?: return Result.NoCredentials
+        val connector = graph.primaryConnector.value ?: return Result.NoClient
+        val client = connector.client
+        val credentials = connector.credentials
 
         val mode = EncryptionMode.fromTypeString(credentials.encryptionKeyset.type)
         if (mode != EncryptionMode.AES256_GCM_SIV) {

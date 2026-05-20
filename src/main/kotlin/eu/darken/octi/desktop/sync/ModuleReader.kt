@@ -46,10 +46,10 @@ class ModuleReader(private val graph: AppGraph) {
         targetDeviceId: DeviceId,
         serializer: KSerializer<T>,
     ): Result<T> {
-        val client = graph.activeClient.value
-            ?: return Result.Error(IllegalStateException("No active client (not linked)"))
-        val credentials = graph.credentialsStore.load()
-            ?: return Result.Error(IllegalStateException("No credentials stored"))
+        val connector = graph.primaryConnector.value
+            ?: return Result.Error(IllegalStateException("No active connector (not linked)"))
+        val client = connector.client
+        val credentials = connector.credentials
 
         return try {
             when (val response = client.readModule(moduleId, targetDeviceId)) {

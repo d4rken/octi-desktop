@@ -76,7 +76,7 @@ class LinkingViewModel(private val graph: AppGraph) {
             // synchronous file I/O; wrap so we recover instead of crashing the flow.
             runCatching {
                 graph.settings.update {
-                    it.copy(customServerUrl = serverUrlInput.trim().takeIf { raw -> raw.isNotEmpty() })
+                    it.copy(createAccountServerUrl = serverUrlInput.trim().takeIf { raw -> raw.isNotEmpty() })
                 }
             }.onFailure { settingsCause ->
                 if (settingsCause is kotlinx.coroutines.CancellationException) throw settingsCause
@@ -105,8 +105,8 @@ class LinkingViewModel(private val graph: AppGraph) {
 
     private fun handleLinkResult(result: LinkResult) {
         _state.value = when (result) {
-            LinkResult.Success -> {
-                graph.onLinked()
+            is LinkResult.Success -> {
+                graph.onLinked(result.connectorId, result.credentials)
                 LinkingUiState.Idle
             }
             LinkResult.InvalidBase64 -> LinkingUiState.Error(
@@ -130,6 +130,9 @@ class LinkingViewModel(private val graph: AppGraph) {
             is LinkResult.KeystoreFailureRolledBack -> LinkingUiState.Error(
                 "Saved server registration but couldn't store credentials locally. Server was cleaned up — try again.",
             )
+            is LinkResult.SettingsPersistFailedRolledBack -> LinkingUiState.Error(
+                "Credentials saved but the local settings file couldn't be updated. Server was cleaned up — try again.",
+            )
             is LinkResult.OrphanedDevice -> LinkingUiState.Error(
                 "Server registered this device but local save AND rollback both failed. " +
                     "Open Settings on a working device and remove the orphan.",
@@ -139,8 +142,8 @@ class LinkingViewModel(private val graph: AppGraph) {
 
     private fun handleCreateResult(result: CreateAccountResult) {
         _state.value = when (result) {
-            CreateAccountResult.Success -> {
-                graph.onLinked()
+            is CreateAccountResult.Success -> {
+                graph.onLinked(result.connectorId, result.credentials)
                 LinkingUiState.Idle
             }
             CreateAccountResult.DeviceAlreadyRegistered -> LinkingUiState.Error(
@@ -154,6 +157,9 @@ class LinkingViewModel(private val graph: AppGraph) {
             )
             is CreateAccountResult.KeystoreFailureRolledBack -> LinkingUiState.Error(
                 "Created the account but couldn't store credentials locally. Server was cleaned up — try again.",
+            )
+            is CreateAccountResult.SettingsPersistFailedRolledBack -> LinkingUiState.Error(
+                "Account created but the local settings file couldn't be updated. Server was cleaned up — try again.",
             )
             is CreateAccountResult.OrphanedAccount -> LinkingUiState.Error(
                 "Server created the account but local save AND rollback both failed. " +

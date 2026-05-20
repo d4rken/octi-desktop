@@ -21,8 +21,9 @@ class DesktopIdentityTest {
         val id = DesktopIdentity.fromChannel("stable")
         id shouldBe DesktopIdentity.Stable
         id.appName shouldBe "octi"
-        id.credentialsKey shouldBe "octiserver.credentials.active"
+        id.credentialsKeyPrefix shouldBe "octiserver.credentials"
         id.keystoreServiceLabel shouldBe "eu.darken.octi.desktop"
+        id.credentialsKeyFor("kserver-host-abc") shouldBe "octiserver.credentials.kserver-host-abc"
     }
 
     @Test
@@ -31,8 +32,10 @@ class DesktopIdentityTest {
         val id = DesktopIdentity.fromChannel("canary")
         id shouldBe DesktopIdentity.Canary
         id.appName shouldBe "octi-canary"
-        id.credentialsKey shouldBe "octiserver.credentials.active.canary"
+        id.credentialsKeyPrefix shouldBe "octiserver.credentials.canary"
         id.keystoreServiceLabel shouldBe "eu.darken.octi.desktop.canary"
+        id.credentialsKeyFor("kserver-host-abc") shouldBe
+            "octiserver.credentials.canary.kserver-host-abc"
     }
 
     @Test
@@ -41,8 +44,12 @@ class DesktopIdentityTest {
         val stable = DesktopIdentity.Stable
         val canary = DesktopIdentity.Canary
         stable.appName shouldNotBe canary.appName
-        stable.credentialsKey shouldNotBe canary.credentialsKey
+        stable.credentialsKeyPrefix shouldNotBe canary.credentialsKeyPrefix
         stable.keystoreServiceLabel shouldNotBe canary.keystoreServiceLabel
+        // A given connector idString must produce different keystore keys on each channel —
+        // this is the durable property that prevents canary from reading stable's credentials.
+        stable.credentialsKeyFor("kserver-host-abc") shouldNotBe
+            canary.credentialsKeyFor("kserver-host-abc")
     }
 
     @Test

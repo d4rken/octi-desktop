@@ -5,11 +5,13 @@ import eu.darken.octi.desktop.protocol.encryption.PayloadEncryption
 import eu.darken.octi.desktop.protocol.octiserver.DeviceMetadata
 import eu.darken.octi.desktop.protocol.octiserver.LinkingData
 import eu.darken.octi.desktop.protocol.octiserver.OctiServer
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector.Companion.toConnectorId
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpClient
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerHttpException
 import eu.darken.octi.desktop.protocol.octiserver.dto.RegisterResponse
 import eu.darken.octi.desktop.protocol.serialization.Serialization
 import eu.darken.octi.desktop.protocol.sync.DeviceId
+import eu.darken.octi.desktop.storage.Settings
 import eu.darken.octi.desktop.storage.keystore.Keystore
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
@@ -20,13 +22,17 @@ import io.mockk.justRun
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.test.runTest
-import okio.ByteString
 import okio.ByteString.Companion.encodeUtf8
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 
 class LinkControllerTest {
+
+    @TempDir
+    lateinit var tempDir: Path
 
     private val json = Serialization.json
     private val deviceMetadata = DeviceMetadata(
@@ -61,13 +67,19 @@ class LinkControllerTest {
         override fun delete(key: String) = Unit
     }
 
+    /** Per-test settings backed by a tmp file. Each call gets a fresh file. */
+    private fun newSettings(name: String = "settings.json"): Settings =
+        Settings.load(file = tempDir.resolve(name))
+
     private fun newController(
         store: CredentialsStore = CredentialsStore(newKeystore()),
         factory: LinkController.HttpClientFactory = rejectingFactory,
         gcmSivAvailable: () -> Boolean = { true },
+        settings: Settings = newSettings(),
     ): LinkController = LinkController(
         deviceMetadataProvider = metadataProvider,
         credentialsStore = store,
+        settings = settings,
         httpClientFactory = factory,
         gcmSivAvailable = gcmSivAvailable,
     )
@@ -131,7 +143,7 @@ class LinkControllerTest {
     // --- Server-stage paths for link() ---
 
     @Test
-    @DisplayName("link happy path: server returns credentials → save → Success; client closed")
+    @DisplayName("link happy path: server returns credentials → keystore + settings persisted → Success(connectorId, credentials)")
     fun linkHappyPath() = runTest {
         val client = mockk<OctiServerHttpClient>(relaxed = true)
         coEvery { client.register(shareCode = any()) } returns RegisterResponse(
@@ -140,37 +152,45 @@ class LinkControllerTest {
         )
 
         val store = CredentialsStore(newKeystore())
+        val settings = newSettings()
         val factory = LinkController.HttpClientFactory { _, _, _, _ -> client }
-        val controller = newController(store, factory)
+        val controller = newController(store, factory, settings = settings)
 
         val result = controller.link(validEncodedLink(), newDeviceId)
-        result shouldBe LinkResult.Success
-        val loaded = store.load()
-        check(loaded != null) { "credentials must be persisted" }
+        result.shouldBeInstanceOf<LinkResult.Success>()
+        result.credentials.accountId.id shouldBe "acct-123"
+        result.credentials.devicePassword.password shouldBe "pw-shhh"
+        result.connectorId shouldBe result.credentials.toConnectorId()
+        // Keystore contains the credentials under the connector id.
+        val loaded = store.load(result.connectorId)
+        check(loaded != null) { "credentials must be persisted under the connectorId" }
         loaded.accountId.id shouldBe "acct-123"
-        loaded.devicePassword.password shouldBe "pw-shhh"
+        // Settings.connectors has the matching discovery entry.
+        val cfg = settings.data.connectors[result.connectorId.idString]
+        check(cfg != null) { "settings.connectors must contain the new connector entry" }
+        cfg.connectorId shouldBe result.connectorId
         coVerify { client.register(shareCode = "share-abc") }
         verify { client.close() }
     }
 
     @Test
-    @DisplayName("link: expired share code (404) → ShareCodeExpiredOrConsumed, client closed, no credentials")
+    @DisplayName("link: expired share code (404) → ShareCodeExpiredOrConsumed, client closed, no credentials, no settings entry")
     fun expiredShareCode() = runTest {
         val client = mockk<OctiServerHttpClient>(relaxed = true)
         coEvery { client.register(shareCode = any()) } throws OctiServerHttpException(HttpStatusCode.NotFound, "test")
 
         val store = CredentialsStore(newKeystore())
+        val settings = newSettings()
         val factory = LinkController.HttpClientFactory { _, _, _, _ -> client }
-        val controller = newController(store, factory)
+        val controller = newController(store, factory, settings = settings)
 
         controller.link(validEncodedLink(), newDeviceId) shouldBe LinkResult.ShareCodeExpiredOrConsumed
-        check(store.load() == null) { "no credentials should be saved on expired share code" }
-        // Even when register() throws, the client must be closed (avoids the prior leak).
+        settings.data.connectors shouldBe emptyMap()
         verify { client.close() }
     }
 
     @Test
-    @DisplayName("link: keystore write fails → rollback DELETE called → KeystoreFailureRolledBack")
+    @DisplayName("link: keystore write fails → rollback DELETE called → KeystoreFailureRolledBack; settings untouched")
     fun keystoreFailureTriggersRollback() = runTest {
         val unauthedClient = mockk<OctiServerHttpClient>(relaxed = true)
         coEvery { unauthedClient.register(shareCode = any()) } returns RegisterResponse(
@@ -198,12 +218,15 @@ class LinkControllerTest {
             }
         }
 
+        val settings = newSettings()
         val controller = newController(
             store = CredentialsStore(failingKeystore("disk full")),
             factory = factory,
+            settings = settings,
         )
         val result = controller.link(validEncodedLink(), newDeviceId)
         result.shouldBeInstanceOf<LinkResult.KeystoreFailureRolledBack>()
+        settings.data.connectors shouldBe emptyMap()
         coVerify(exactly = 1) { authedClient.deleteDevice(newDeviceId) }
         callIndex.get() shouldBe 2
         verify { unauthedClient.close() }
@@ -236,10 +259,68 @@ class LinkControllerTest {
         verify { authedClient.close() }
     }
 
+    @Test
+    @DisplayName("link: settings write fails after keystore save → keystore cleared + rollback DELETE → SettingsPersistFailedRolledBack")
+    fun settingsFailureTriggersFullRollback() = runTest {
+        val unauthedClient = mockk<OctiServerHttpClient>(relaxed = true)
+        coEvery { unauthedClient.register(shareCode = any()) } returns RegisterResponse(
+            accountID = "acct-settings",
+            password = "pw-settings",
+        )
+
+        val authedClient = mockk<OctiServerHttpClient>(relaxed = true)
+        coEvery { authedClient.deleteDevice(any()) } returns Unit
+
+        val callIndex = AtomicInteger(0)
+        val factory = LinkController.HttpClientFactory { _, _, _, credentials ->
+            when (callIndex.getAndIncrement()) {
+                0 -> {
+                    check(credentials == null)
+                    unauthedClient
+                }
+                1 -> {
+                    check(credentials != null) { "rollback factory call must carry credentials" }
+                    credentials.accountId.id shouldBe "acct-settings"
+                    authedClient
+                }
+                else -> error("factory called more than twice")
+            }
+        }
+
+        // Settings file path that can't be written to — points at a directory rather than a
+        // file. The atomic write step throws on rename, which the controller maps to
+        // SettingsPersistFailedRolledBack.
+        val settingsDir = tempDir.resolve("settings-broken")
+        // Initialize Settings against a real path first so the deviceId is minted, then sabotage
+        // the file by replacing it with a directory of the same name.
+        val sabotagedSettings = Settings.load(file = settingsDir.resolve("settings.json"))
+        // Replace the settings file with a directory so subsequent atomic writes fail.
+        java.nio.file.Files.delete(settingsDir.resolve("settings.json"))
+        java.nio.file.Files.createDirectory(settingsDir.resolve("settings.json"))
+
+        val store = CredentialsStore(newKeystore())
+        val controller = newController(store = store, factory = factory, settings = sabotagedSettings)
+        val result = controller.link(validEncodedLink(), newDeviceId)
+        result.shouldBeInstanceOf<LinkResult.SettingsPersistFailedRolledBack>()
+        coVerify(exactly = 1) { authedClient.deleteDevice(newDeviceId) }
+        // Keystore was cleared as part of rollback — credentials for the new id are gone.
+        val connectorId = OctiServer.Credentials(
+            serverAdress = OctiServer.Address(domain = "test.example.com"),
+            accountId = OctiServer.Credentials.AccountId("acct-settings"),
+            devicePassword = OctiServer.Credentials.DevicePassword("pw-settings"),
+            encryptionKeyset = PayloadEncryption().exportKeyset(),
+        ).toConnectorId()
+        // Can't easily reconstruct the exact connectorId (keyset is fresh per test run) — but
+        // the keystore should be empty of any credential entry under any id derived from the
+        // server domain in validEncodedLink().
+        store.load(connectorId) shouldBe null
+        verify { authedClient.close() }
+    }
+
     // --- createAccount() ---
 
     @Test
-    @DisplayName("createAccount happy path: server returns credentials → save → Success with GCM-SIV keyset")
+    @DisplayName("createAccount happy path: credentials persisted in keystore + settings.connectors, Success carries connectorId")
     fun createAccountHappyPath() = runTest {
         val client = mockk<OctiServerHttpClient>(relaxed = true)
         coEvery { client.register(shareCode = null) } returns RegisterResponse(
@@ -248,52 +329,58 @@ class LinkControllerTest {
         )
 
         val store = CredentialsStore(newKeystore())
+        val settings = newSettings()
         val factory = LinkController.HttpClientFactory { _, _, _, _ -> client }
-        val controller = newController(store, factory, gcmSivAvailable = { true })
+        val controller = newController(store, factory, settings = settings, gcmSivAvailable = { true })
 
         val target = OctiServer.Address(domain = "fresh.example.com")
         val result = controller.createAccount(newDeviceId, target)
-        result shouldBe CreateAccountResult.Success
-        val loaded = store.load()
-        check(loaded != null) { "credentials must be persisted" }
+        result.shouldBeInstanceOf<CreateAccountResult.Success>()
+        result.credentials.accountId.id shouldBe "acct-new-1"
+        result.credentials.serverAdress shouldBe target
+        result.credentials.encryptionKeyset.type shouldBe "AES256_GCM_SIV"
+        result.connectorId shouldBe result.credentials.toConnectorId()
+        val loaded = store.load(result.connectorId)
+        check(loaded != null) { "credentials must be persisted under the connectorId" }
         loaded.accountId.id shouldBe "acct-new-1"
-        loaded.devicePassword.password shouldBe "fresh-pw"
         loaded.serverAdress shouldBe target
-        loaded.encryptionKeyset.type shouldBe "AES256_GCM_SIV"
+        settings.data.connectors[result.connectorId.idString]?.connectorId shouldBe result.connectorId
         coVerify { client.register(shareCode = null) }
         verify { client.close() }
     }
 
     @Test
-    @DisplayName("createAccount: server 400 → DeviceAlreadyRegistered, no credentials saved, client closed")
+    @DisplayName("createAccount: server 400 → DeviceAlreadyRegistered, no keystore/settings writes, client closed")
     fun createAccountDeviceAlreadyRegistered() = runTest {
         val client = mockk<OctiServerHttpClient>(relaxed = true)
         coEvery { client.register(shareCode = null) } throws
             OctiServerHttpException(HttpStatusCode.BadRequest, "test")
 
         val store = CredentialsStore(newKeystore())
+        val settings = newSettings()
         val factory = LinkController.HttpClientFactory { _, _, _, _ -> client }
-        val controller = newController(store, factory)
+        val controller = newController(store, factory, settings = settings)
 
         val result = controller.createAccount(newDeviceId, OctiServer.Address(domain = "x.example.com"))
         result shouldBe CreateAccountResult.DeviceAlreadyRegistered
-        check(store.load() == null)
+        settings.data.connectors shouldBe emptyMap()
         verify { client.close() }
     }
 
     @Test
-    @DisplayName("createAccount: non-400 server error → NetworkError, no credentials saved, client closed")
+    @DisplayName("createAccount: non-400 server error → NetworkError, no keystore/settings writes, client closed")
     fun createAccountNetworkError() = runTest {
         val client = mockk<OctiServerHttpClient>(relaxed = true)
         coEvery { client.register(shareCode = null) } throws RuntimeException("connect timed out")
 
         val store = CredentialsStore(newKeystore())
+        val settings = newSettings()
         val factory = LinkController.HttpClientFactory { _, _, _, _ -> client }
-        val controller = newController(store, factory)
+        val controller = newController(store, factory, settings = settings)
 
         val result = controller.createAccount(newDeviceId, OctiServer.Address(domain = "x.example.com"))
         result.shouldBeInstanceOf<CreateAccountResult.NetworkError>()
-        check(store.load() == null)
+        settings.data.connectors shouldBe emptyMap()
         verify { client.close() }
     }
 
@@ -309,9 +396,9 @@ class LinkControllerTest {
         val factory = LinkController.HttpClientFactory { _, _, _, _ -> client }
         val controller = newController(store, factory, gcmSivAvailable = { false })
 
-        controller.createAccount(newDeviceId, OctiServer.Address(domain = "x.example.com")) shouldBe
-            CreateAccountResult.Success
-        store.load()?.encryptionKeyset?.type shouldBe "AES256_SIV"
+        val result = controller.createAccount(newDeviceId, OctiServer.Address(domain = "x.example.com"))
+        result.shouldBeInstanceOf<CreateAccountResult.Success>()
+        result.credentials.encryptionKeyset.type shouldBe "AES256_SIV"
     }
 
     @Test
@@ -342,12 +429,15 @@ class LinkControllerTest {
             }
         }
 
+        val settings = newSettings()
         val controller = newController(
             store = CredentialsStore(failingKeystore("disk full")),
             factory = factory,
+            settings = settings,
         )
         val result = controller.createAccount(newDeviceId, OctiServer.Address(domain = "x.example.com"))
         result.shouldBeInstanceOf<CreateAccountResult.KeystoreFailureRolledBack>()
+        settings.data.connectors shouldBe emptyMap()
         // Must call deleteAccount (not deleteDevice) — fresh account has no other devices.
         coVerify(exactly = 1) { authedClient.deleteAccount() }
         coVerify(exactly = 0) { authedClient.deleteDevice(any()) }
@@ -379,6 +469,36 @@ class LinkControllerTest {
         )
         val result = controller.createAccount(newDeviceId, OctiServer.Address(domain = "x.example.com"))
         result.shouldBeInstanceOf<CreateAccountResult.OrphanedAccount>()
+        verify { authedClient.close() }
+    }
+
+    @Test
+    @DisplayName("createAccount: settings write fails after keystore save → keystore cleared + rollback deleteAccount → SettingsPersistFailedRolledBack")
+    fun createAccountSettingsFailureTriggersFullRollback() = runTest {
+        val unauthedClient = mockk<OctiServerHttpClient>(relaxed = true)
+        coEvery { unauthedClient.register(shareCode = null) } returns RegisterResponse(
+            accountID = "acct-set",
+            password = "pw-set",
+        )
+
+        val authedClient = mockk<OctiServerHttpClient>(relaxed = true)
+        coEvery { authedClient.deleteAccount() } returns Unit
+
+        val callIndex = AtomicInteger(0)
+        val factory = LinkController.HttpClientFactory { _, _, _, _ ->
+            if (callIndex.getAndIncrement() == 0) unauthedClient else authedClient
+        }
+
+        val settingsDir = tempDir.resolve("settings-broken-create")
+        val sabotagedSettings = Settings.load(file = settingsDir.resolve("settings.json"))
+        java.nio.file.Files.delete(settingsDir.resolve("settings.json"))
+        java.nio.file.Files.createDirectory(settingsDir.resolve("settings.json"))
+
+        val store = CredentialsStore(newKeystore())
+        val controller = newController(store = store, factory = factory, settings = sabotagedSettings)
+        val result = controller.createAccount(newDeviceId, OctiServer.Address(domain = "x.example.com"))
+        result.shouldBeInstanceOf<CreateAccountResult.SettingsPersistFailedRolledBack>()
+        coVerify(exactly = 1) { authedClient.deleteAccount() }
         verify { authedClient.close() }
     }
 }

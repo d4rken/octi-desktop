@@ -9,8 +9,6 @@ import eu.darken.octi.desktop.modules.files.FileShareRepo
 import eu.darken.octi.desktop.protocol.encryption.EncryptionMode
 import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.files.FileShareInfo
-import eu.darken.octi.desktop.protocol.sync.ConnectorId
-import eu.darken.octi.desktop.protocol.sync.ConnectorType
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -150,18 +148,12 @@ class FilesViewModel(
     }
 
     private fun isLegacyKeyset(): Boolean {
-        val credentials = graph.credentialsStore.load() ?: return false
+        val credentials = graph.primaryConnector.value?.credentials ?: return false
         return EncryptionMode.fromTypeString(credentials.encryptionKeyset.type) != EncryptionMode.AES256_GCM_SIV
     }
 
-    private fun currentConnectorIdString(): String? {
-        val credentials = graph.credentialsStore.load() ?: return null
-        return ConnectorId(
-            type = ConnectorType.OCTISERVER,
-            subtype = credentials.serverAdress.domain,
-            account = credentials.accountId.id,
-        ).idString
-    }
+    private fun currentConnectorIdString(): String? =
+        graph.primaryConnector.value?.identifier?.idString
 
 }
 

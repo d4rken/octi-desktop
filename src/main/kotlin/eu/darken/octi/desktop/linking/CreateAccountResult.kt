@@ -1,5 +1,8 @@
 package eu.darken.octi.desktop.linking
 
+import eu.darken.octi.desktop.protocol.octiserver.OctiServer
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
+
 /**
  * Outcome of a [LinkController.createAccount] call. Distinct from [LinkResult] because the
  * rollback target differs (`DELETE /v1/account` versus `DELETE /v1/devices/{id}` for the link
@@ -7,8 +10,14 @@ package eu.darken.octi.desktop.linking
  * "device already registered" path).
  */
 sealed class CreateAccountResult {
-    /** Account created on the server and credentials persisted locally. */
-    data object Success : CreateAccountResult()
+    /**
+     * Account created on the server, credentials are in the keystore AND a
+     * [eu.darken.octi.desktop.storage.ConnectorConfig] entry exists in `SettingsData.connectors`.
+     */
+    data class Success(
+        val connectorId: ConnectorId,
+        val credentials: OctiServer.Credentials,
+    ) : CreateAccountResult()
 
     /**
      * Server returned HTTP 400 "Device is already registered" — this desktop's deviceId is
@@ -26,6 +35,16 @@ sealed class CreateAccountResult {
      * remains on the server.
      */
     data class KeystoreFailureRolledBack(val cause: Throwable) : CreateAccountResult()
+
+    /**
+     * Keystore save succeeded but writing the discovery entry to [eu.darken.octi.desktop.storage.SettingsData.connectors]
+     * failed. Controller has rolled back: keystore entry deleted (best effort) AND server-side
+     * `DELETE /v1/account` issued. User should retry.
+     */
+    data class SettingsPersistFailedRolledBack(
+        val cause: Throwable,
+        val keystoreCleanupFailure: Throwable? = null,
+    ) : CreateAccountResult()
 
     /**
      * Server created the account AND the rollback DELETE itself failed. The account exists on

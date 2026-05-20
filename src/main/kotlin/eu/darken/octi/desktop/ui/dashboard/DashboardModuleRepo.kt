@@ -44,7 +44,7 @@ private val TAG = logTag("UI", "DashboardModuleRepo")
  * sync layer.
  */
 sealed class ModuleState<out T> {
-    /** Before the first read completes, OR after `activeClient` flips to null. */
+    /** Before the first read completes, OR after `primaryConnector` flips to null. */
     data object Loading : ModuleState<Nothing>()
 
     /** Server returned 204 / NotFound — peer hasn't written this module. Render per [NotFoundPolicy]. */
@@ -84,7 +84,7 @@ sealed class ModuleState<out T> {
  *   state leaves `PollingFallback`.
  * - **Eviction**: when a device disappears from `deviceListRepo.devices`, we drop its slices
  *   from the cache.
- * - **Active-client transitions**: when `activeClient` flips, we kick all slices. The slice
+ * - **Active-connector transitions**: when `primaryConnector` flips, we kick all slices. The slice
  *   itself sees the null client and emits `Loading`; on relink the next kick hydrates.
  */
 class DashboardModuleRepo(
@@ -132,10 +132,10 @@ class DashboardModuleRepo(
                     .launchIn(this)
             }
 
-            // Active-client transitions: kick everyone (slice itself sees the null and emits
+            // Active-connector transitions: kick everyone (slice itself sees the null and emits
             // Loading; on relink the next kick hydrates).
             launch {
-                graph.activeClient
+                graph.primaryConnector
                     .onEach { slices.values.forEach { it.kick() } }
                     .launchIn(this)
             }
@@ -265,7 +265,7 @@ class DashboardModuleRepo(
             )
 
         private suspend fun readOnce(): ModuleState<T> {
-            if (graph.activeClient.value == null) return ModuleState.Loading
+            if (graph.primaryConnector.value == null) return ModuleState.Loading
             return readSemaphore.withPermit {
                 try {
                     when (val result = graph.moduleReader.read(spec.moduleId, deviceId, spec.serializer)) {

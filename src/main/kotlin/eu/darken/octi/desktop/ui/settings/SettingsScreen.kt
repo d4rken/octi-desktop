@@ -59,8 +59,8 @@ import kotlinx.coroutines.withContext
 fun SettingsScreen() {
     val graph = LocalAppGraph.current
     val settings by graph.settings.flow.collectAsState()
-    val activeClient by graph.activeClient.collectAsState()
-    val linkedCredentials = remember(activeClient) { graph.credentialsStore.load() }
+    val primaryConnector by graph.primaryConnector.collectAsState()
+    val linkedCredentials = primaryConnector?.credentials
 
     Scaffold(
         topBar = {
@@ -89,12 +89,12 @@ fun SettingsScreen() {
                     },
                 )
                 ServerSetting(
-                    customServerUrl = settings.customServerUrl.orEmpty(),
+                    createAccountServerUrl = settings.createAccountServerUrl.orEmpty(),
                     linkedServer = linkedCredentials?.serverAdress,
                     onSave = { value ->
                         // UI commits only valid (or blank → null) values. The TextField's local
                         // state stays unconstrained between saves so the user can correct typos.
-                        graph.settings.update { it.copy(customServerUrl = value) }
+                        graph.settings.update { it.copy(createAccountServerUrl = value) }
                     },
                 )
                 ThemeModeSetting(
@@ -121,7 +121,7 @@ fun SettingsScreen() {
 
 @Composable
 private fun ServerSetting(
-    customServerUrl: String,
+    createAccountServerUrl: String,
     linkedServer: OctiServer.Address?,
     onSave: (String?) -> Unit,
 ) {
@@ -139,7 +139,7 @@ private fun ServerSetting(
                         "to use the production server (${OctiServer.Official.PROD.address.address}).",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                ServerUrlEditor(initial = customServerUrl, onSave = onSave)
+                ServerUrlEditor(initial = createAccountServerUrl, onSave = onSave)
             }
         }
     }
@@ -382,6 +382,7 @@ private fun PathRow(
 private fun AccountSection(graph: AppGraph) {
     var working by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    val primaryConnector by graph.primaryConnector.collectAsState()
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Account", style = MaterialTheme.typography.titleSmall)
@@ -397,9 +398,11 @@ private fun AccountSection(graph: AppGraph) {
                     color = MaterialTheme.colorScheme.error,
                 )
             }
+            val targetConnectorId = primaryConnector?.identifier
             Button(
-                enabled = !working,
+                enabled = !working && targetConnectorId != null,
                 onClick = {
+                    val connectorId = targetConnectorId ?: return@Button
                     errorMessage = null
                     working = true
                     // Launch on the app scope so navigation away mid-unlink doesn't cancel the
@@ -407,7 +410,7 @@ private fun AccountSection(graph: AppGraph) {
                     // state is safest to write from the AWT EDT.
                     graph.appScope.launch {
                         val result = try {
-                            graph.unlink()
+                            graph.unlink(connectorId)
                         } catch (cancel: kotlinx.coroutines.CancellationException) {
                             throw cancel
                         } catch (e: Throwable) {

@@ -2,6 +2,9 @@ package eu.darken.octi.desktop.debug.rpc
 
 import eu.darken.octi.desktop.di.AppGraph
 import eu.darken.octi.desktop.modules.meta.DeviceMetadataProvider
+import eu.darken.octi.desktop.protocol.octiserver.dto.DevicesResponse
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
+import eu.darken.octi.desktop.sync.MergedDevice
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -21,9 +24,34 @@ interface DebugStateSource {
  * Production [DebugStateSource]. Reads `.value` from each observable graph flow rather than
  * collecting, so the response is fast and never blocks waiting for an event to arrive.
  *
- * Codex review #6: don't claim more than we know. `activeClient` being non-null means
- * "credentials configured" — not "the WebSocket is currently connected." Report the WebSocket's
- * own state separately so callers can tell which.
+ * Payload shape (multi-connector ready — array sizes are 0-or-1 today):
+ *
+ * ```json
+ * {
+ *   "version": "0.X.Y",
+ *   "deviceId": "<uuid>",
+ *   "screen": "dashboard",
+ *   "connectors": [
+ *     {
+ *       "id": "kserver-host-acct",
+ *       "type": "octiserver",
+ *       "webSocketState": "Connected",
+ *       "deviceListLoadState": "Ok"
+ *     }
+ *   ],
+ *   "deviceCount": 2,
+ *   "knownDevices": [
+ *     { "deviceId": "...", "label": "...", "platform": "...", "lastSeen": "...",
+ *       "capabilities": [...], "sources": ["kserver-host-acct"] }
+ *   ],
+ *   "lastMetaWriteSuccessAt": "...",
+ *   "lastWsEventAt": "..."
+ * }
+ * ```
+ *
+ * The old `activeClientPresent`, top-level `webSocketState`, and top-level `deviceListLoadState`
+ * are gone — callers iterate `connectors[]` for per-connector detail and union/check across
+ * sources for "is anything active" predicates.
  */
 class DebugStateProvider(private val graph: AppGraph) : DebugStateSource {
 
@@ -31,38 +59,53 @@ class DebugStateProvider(private val graph: AppGraph) : DebugStateSource {
         put("version", JsonPrimitive(DeviceMetadataProvider.APP_VERSION))
         put("deviceId", JsonPrimitive(graph.deviceId.id))
         put("screen", JsonPrimitive(graph.navigator.current.value.routeName()))
-        put("activeClientPresent", JsonPrimitive(graph.activeClient.value != null))
-        put("webSocketState", JsonPrimitive(webSocketStateName()))
-        put("deviceListLoadState", JsonPrimitive(deviceListStateName()))
-        put("deviceCount", JsonPrimitive(graph.deviceListRepo.devices.value.size))
-        put("knownDevices", buildJsonArray {
-            graph.deviceListRepo.devices.value.forEach { device ->
-                add(buildJsonObject {
-                    put("deviceId", JsonPrimitive(device.id))
-                    put("label", device.label.toJson())
-                    put("platform", device.platform.toJson())
-                    put("lastSeen", device.lastSeen?.toString().toJson())
-                    // Preserve the null-vs-empty distinction — null = peer hasn't reported,
-                    // empty array = peer explicitly reports no capabilities. The Capability
-                    // authority semantics depend on this difference.
-                    put(
-                        "capabilities",
-                        device.capabilities?.let { caps ->
-                            buildJsonArray { caps.sorted().forEach { add(JsonPrimitive(it)) } }
-                        } ?: JsonNull,
-                    )
-                })
-            }
-        })
+        put("connectors", connectorsArray())
+        val merged = graph.deviceListRepo.mergedDevices.value
+        put("deviceCount", JsonPrimitive(merged.size))
+        put("knownDevices", knownDevicesArray(merged))
         put("lastMetaWriteSuccessAt", graph.metaWriter.lastWriteSuccessAt.value?.toString().toJson())
         put("lastWsEventAt", graph.syncEventBus.lastEventAt.value?.toString().toJson())
     }
 
-    private fun webSocketStateName(): String = graph.webSocketClient.state.value::class.simpleName
-        ?: "Unknown"
+    private fun connectorsArray() = buildJsonArray {
+        val wsStates = graph.webSocketClient.statesByConnector.value
+        val loadStates = graph.deviceListRepo.loadStateByConnector.value
+        graph.activeConnectors.value.forEach { connector ->
+            val id = connector.identifier
+            add(buildJsonObject {
+                put("id", JsonPrimitive(id.idString))
+                put("type", JsonPrimitive(id.type.typeId))
+                put("webSocketState", JsonPrimitive(wsStates[id]?.let { it::class.simpleName } ?: "Idle"))
+                put("deviceListLoadState", JsonPrimitive(loadStates[id]?.let { it::class.simpleName } ?: "Loading"))
+            })
+        }
+    }
 
-    private fun deviceListStateName(): String = graph.deviceListRepo.loadState.value::class.simpleName
-        ?: "Unknown"
+    private fun knownDevicesArray(merged: List<MergedDevice>) = buildJsonArray {
+        merged.forEach { m ->
+            add(buildJsonObject {
+                put("deviceId", JsonPrimitive(m.device.id))
+                put("label", m.device.label.toJson())
+                put("platform", m.device.platform.toJson())
+                put("lastSeen", m.device.lastSeen?.toString().toJson())
+                // Preserve the null-vs-empty distinction — null = peer hasn't reported,
+                // empty array = peer explicitly reports no capabilities. The Capability
+                // authority semantics depend on this difference.
+                put(
+                    "capabilities",
+                    m.device.capabilities?.let { caps ->
+                        buildJsonArray { caps.sorted().forEach { add(JsonPrimitive(it)) } }
+                    } ?: JsonNull,
+                )
+                put(
+                    "sources",
+                    buildJsonArray {
+                        m.sources.map { it.idString }.sorted().forEach { add(JsonPrimitive(it)) }
+                    },
+                )
+            })
+        }
+    }
 
     private fun String?.toJson(): JsonElement = this?.let(::JsonPrimitive) ?: JsonNull
 
@@ -73,4 +116,7 @@ class DebugStateProvider(private val graph: AppGraph) : DebugStateSource {
         eu.darken.octi.desktop.ui.nav.Screen.Settings -> "settings"
         is eu.darken.octi.desktop.ui.nav.Screen.Files -> "files:${this.deviceId}"
     }
+
+    @Suppress("unused")
+    private val keepImportsHonest: DevicesResponse.Device? = null
 }

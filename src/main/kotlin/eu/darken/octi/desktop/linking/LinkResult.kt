@@ -1,5 +1,8 @@
 package eu.darken.octi.desktop.linking
 
+import eu.darken.octi.desktop.protocol.octiserver.OctiServer
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
+
 /**
  * Outcome of a [LinkController.link] call. UI maps these to user-visible error strings.
  *
@@ -7,8 +10,16 @@ package eu.darken.octi.desktop.linking
  * failed — and so the share code isn't consumed unless all local validation passed.
  */
 sealed class LinkResult {
-    /** Linking succeeded and credentials are persisted. */
-    data object Success : LinkResult()
+    /**
+     * Linking succeeded — credentials are in the keystore AND a [eu.darken.octi.desktop.storage.ConnectorConfig]
+     * entry exists in `SettingsData.connectors`. Carries [connectorId] and the freshly-minted
+     * [credentials] so AppGraph can build an [eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector]
+     * without re-reading the keystore.
+     */
+    data class Success(
+        val connectorId: ConnectorId,
+        val credentials: OctiServer.Credentials,
+    ) : LinkResult()
 
     /** Input wasn't valid base64. Local validation failure; share code untouched. */
     data object InvalidBase64 : LinkResult()
@@ -34,6 +45,21 @@ sealed class LinkResult {
      * /v1/devices/{self}` so no orphaned device remains on the server.
      */
     data class KeystoreFailureRolledBack(val cause: Throwable) : LinkResult()
+
+    /**
+     * Keystore save succeeded but writing the discovery entry to [eu.darken.octi.desktop.storage.SettingsData.connectors]
+     * failed. The controller has rolled back: keystore entry deleted (best effort) AND server-side
+     * `DELETE /v1/devices/{self}` issued. Surface as a "try again" error to the user; their
+     * state is consistent (no local creds, no server-side device).
+     *
+     * [keystoreCleanupFailure] is non-null when the best-effort keystore delete itself threw; the
+     * orphan keystore entry is unreachable (no settings entry → no idString to query) so this is
+     * informational, not fatal.
+     */
+    data class SettingsPersistFailedRolledBack(
+        val cause: Throwable,
+        val keystoreCleanupFailure: Throwable? = null,
+    ) : LinkResult()
 
     /**
      * Server consumed the share code AND the rollback DELETE itself failed. The user's device
