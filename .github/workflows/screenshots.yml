@@ -143,19 +143,31 @@ jobs:
             build/screenshots/captured
           if-no-files-found: warn
 
-      - name: Open PR with the refreshed screenshots
-        # TODO: pin to a verified SHA before turning this workflow on for protected branches.
-        # Major-tag pin is acceptable while this workflow is opt-in / manual.
-        uses: peter-evans/create-pull-request@v7
-        with:
-          commit-message: "Refresh README screenshots"
-          title: "Refresh README screenshots"
-          body: |
-            Automated refresh from the `Update screenshots` workflow.
+      - name: Push branch + open PR via gh CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
 
-            Captured against sync-server image `ghcr.io/d4rken-org/octi-server@${{ github.event.inputs.sync_server_digest || 'default-pin' }}`.
+          BRANCH="screenshots/refresh"
+          git checkout -b "$BRANCH"
+          git add fastlane/metadata/desktop/screenshots/
+          if git diff --staged --quiet; then
+            echo "No screenshot changes vs. main — nothing to PR."
+            exit 0
+          fi
+          git commit -m "Refresh README screenshots"
+          # Force-push: subsequent runs overwrite the same branch, which updates an open PR in
+          # place rather than spawning a fresh one per run.
+          git push --force --set-upstream origin "$BRANCH"
 
-            Review the diffs and merge if the new shots look right.
-          branch: screenshots/refresh
-          delete-branch: true
-          add-paths: fastlane/metadata/desktop/screenshots/*.png
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            echo "PR already open for $BRANCH; pushed an update."
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "Refresh README screenshots" \
+              --body "Automated refresh from the \`Update screenshots\` workflow. Review the diffs and merge if the new shots look right."
+          fi
