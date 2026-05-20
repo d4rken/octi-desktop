@@ -60,9 +60,13 @@ jobs:
           # xauth + xfonts-base are required by Xvfb's bind-time initialization; without them
           # Xvfb writes nothing to stderr and exits before the first xdpyinfo poll, so the
           # failure looks like "did not start" with an empty log.
+          # gnome-keyring + dbus-x11 are what libsecret talks to behind `secret-tool`. The
+          # desktop's LibsecretKeystore writes credentials there on link; without a running
+          # daemon + DBus session, link rolls back with `KeystoreFailureRolledBack`.
           sudo apt-get install -y --no-install-recommends \
             xvfb x11-utils xauth xfonts-base \
-            libsecret-tools imagemagick python3
+            libsecret-tools gnome-keyring dbus-x11 \
+            imagemagick python3
 
       - name: Wait for sync-server
         run: |
@@ -76,6 +80,30 @@ jobs:
           echo "::error::sync-server did not respond within 30s" >&2
           docker logs ${{ job.services.sync-server.id }} || true
           exit 1
+
+      - name: Start D-Bus session + unlock gnome-keyring
+        # The desktop's LibsecretKeystore shells out to `secret-tool`, which talks to a Secret
+        # Service implementation over D-Bus. On a fresh runner neither is running, so the link
+        # step fails with KeystoreFailureRolledBack. Start both, unlock the default collection
+        # with an empty password, and propagate the connection address + control socket via
+        # $GITHUB_ENV so the app launched in a later step inherits them.
+        run: |
+          set -euo pipefail
+          eval "$(dbus-launch --sh-syntax)"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID" >> "$GITHUB_ENV"
+          # --unlock with empty password creates+unlocks the default collection.
+          # --components=secrets skips ssh/pkcs11 components we don't need.
+          eval "$(printf '\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
+          echo "GNOME_KEYRING_CONTROL=$GNOME_KEYRING_CONTROL" >> "$GITHUB_ENV"
+          # Smoke test: write + read a value via secret-tool. Fails loudly here if the daemon
+          # came up but the DBus connection is broken — easier to debug than a later linking
+          # rollback.
+          echo -n "probe-value" | secret-tool store --label=probe service screenshot-ci key probe
+          got=$(secret-tool lookup service screenshot-ci key probe)
+          [[ "$got" == "probe-value" ]] || { echo "::error::secret-tool round-trip failed: '$got'" >&2; exit 1; }
+          secret-tool clear service screenshot-ci key probe
+          echo "gnome-keyring + secret-tool round-trip OK"
 
       - name: Start Xvfb
         run: |
