@@ -44,12 +44,20 @@ For the debug RPC, tests use `testApplication { ... }` from `ktor-server-test-ho
 SMOKE_SERVER_URL=http://127.0.0.1:18080 ./gradlew smokeTest
 ```
 
-CI runs this in `code-checks.yml` against a pinned `octi-server` v1.1.0 digest. Locally,
-start the server first:
+CI runs this in `code-checks.yml` against the floating `ghcr.io/d4rken-org/octi-server:canary`
+tag — octi-server's rolling main build, republished on every server main push. That means
+the desktop smoke fails the day an upstream protocol change lands, without anyone bumping a
+pin. The flip side: an unexplained smoke failure may be an upstream regression, not a
+desktop one — check octi-server main before assuming the desktop side broke.
+
+Locally, start the server first:
 
 ```bash
-docker run --rm -p 18080:8080 ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+docker run --rm -p 18080:8080 ghcr.io/d4rken-org/octi-server:canary
 ```
+
+For a reproducible debugging session against a specific server commit, swap the tag for the
+matching `sha-<short>` immutable tag from `ghcr.io/d4rken-org/octi-server`.
 
 The smoke suite covers:
 

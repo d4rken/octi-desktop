@@ -83,18 +83,23 @@ jobs:
     name: Smoke (real sync-server)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # Pin sync-server by digest so this test can never silently shift if the tag is republished.
-    # This digest is octi-server v1.1.0 — same image octi-web pins. Two service containers
-    # are brought up so MultiConnectorWireSmokeTest can exercise the two-server foundation
-    # that the multi-connector feature builds on. SMOKE_SERVER_URL_B is consumed by the
-    # smokeTest task and surfaced as the `smoke.server.url.b` system property.
+    # Track octi-server's rolling canary tag so this job surfaces wire-format drift the day it
+    # lands on octi-server main, without anyone needing to bump a pinned digest. Trade-off: a
+    # failure here may indicate either a desktop regression OR an upstream change — check
+    # octi-server main if the failure is unexplained. The tag is republished on every server
+    # main push; GH Actions pulls the latest at job start.
+    #
+    # Two service containers are brought up so MultiConnectorWireSmokeTest can exercise the
+    # two-server foundation that the multi-connector feature builds on. Both pull the same
+    # `:canary` tag so cross-server tests run against matching server versions; mismatched
+    # versions would conflate upstream drift with multi-connector regressions.
     services:
       sync-server:
-        image: ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+        image: ghcr.io/d4rken-org/octi-server:canary
         ports:
           - 18080:8080
       sync-server-b:
-        image: ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+        image: ghcr.io/d4rken-org/octi-server:canary
         ports:
           - 18081:8080
     steps:
