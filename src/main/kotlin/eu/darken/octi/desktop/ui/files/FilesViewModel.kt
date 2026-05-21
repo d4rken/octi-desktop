@@ -11,7 +11,6 @@ import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.files.FileShareInfo
 import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
-import eu.darken.octi.desktop.protocol.sync.RemoteBlobRef
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -125,28 +124,16 @@ class FilesViewModel(
     }
 
     /**
-     * Build the ordered `(ConnectorId → serverBlobId)` map for [BlobDownloader.download].
-     * Iteration order matters — the downloader tries sources in order — so we prefer
-     * connectors that are not paused (paused ones can still serve if needed, but skip them
-     * first; they're not refreshing their device list / WS) and within that, deterministic
-     * order by idString.
+     * Build the ordered `(ConnectorId → serverBlobId)` map for [BlobDownloader.download]. The
+     * heavy lifting is in [orderBlobDownloadSources] — this method just feeds the graph's
+     * current connector snapshots into it.
      */
-    private fun downloadSourcesFor(file: FileShareInfo.SharedFile): Map<ConnectorId, String> {
-        val active = graph.activeConnectors.value.associateBy { it.identifier.idString }
-        val running = graph.runningConnectors.value.map { it.identifier.idString }.toSet()
-        val matched: List<Pair<ConnectorId, RemoteBlobRef>> = file.connectorRefs
-            .mapNotNull { (idString, ref) ->
-                val connector = active[idString] ?: return@mapNotNull null
-                connector.identifier to ref
-            }
-        // Running connectors first, then paused (which we still try as a last resort since
-        // the blob really is there — pause silences sync activity, not blob serving).
-        val ordered = matched.sortedWith(
-            compareByDescending<Pair<ConnectorId, RemoteBlobRef>> { it.first.idString in running }
-                .thenBy { it.first.idString },
+    private fun downloadSourcesFor(file: FileShareInfo.SharedFile): Map<ConnectorId, String> =
+        orderBlobDownloadSources(
+            connectorRefs = file.connectorRefs,
+            activeConnectorIds = graph.activeConnectors.value.map { it.identifier },
+            runningConnectorIds = graph.runningConnectors.value.map { it.identifier },
         )
-        return ordered.associate { (id, ref) -> id to ref.value }
-    }
 
     fun requestDeletion(file: FileShareInfo.SharedFile) {
         graph.appScope.launch {
