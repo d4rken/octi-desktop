@@ -21,14 +21,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -85,19 +82,6 @@ class OctiServerWebSocketClient(
 
     /** Per-connector connection state. Empty when no connectors are active. */
     val statesByConnector: StateFlow<Map<ConnectorId, ConnectionState>> = _statesByConnector.asStateFlow()
-
-    /**
-     * Aggregate state view for back-compat with the dashboard/debug single-connector callers.
-     * Today the value is always `statesByConnector[primaryConnector] ?: Idle`; when a second
-     * connector lands, callers that care about per-connector detail switch to
-     * [statesByConnector] — the dashboard polling-fallback gate will need a rule like "any
-     * connector in PollingFallback" rather than "the only one is".
-     */
-    val state: StateFlow<ConnectionState> = graph.primaryConnector
-        .map { primary ->
-            primary?.let { _statesByConnector.value[it.identifier] } ?: ConnectionState.Idle
-        }
-        .stateIn(graph.appScope, SharingStarted.Eagerly, ConnectionState.Idle)
 
     private val retrySignals = MutableStateFlow<Map<ConnectorId, Int>>(emptyMap())
     private val lifecycleLock = Mutex()
