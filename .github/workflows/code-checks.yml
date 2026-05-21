@@ -82,7 +82,24 @@ jobs:
   smoke:
     name: Smoke (real sync-server)
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      DISPLAY: ':99'
+      SYNC_SERVER_URL: 'http://127.0.0.1:18080'
+      SYNC_SERVER_URL_B: 'http://127.0.0.1:18081'
+      RPC_PORT: '53124'
+      RUNTIME_DIR: ${{ github.workspace }}/build/multi-connector-smoke
+      APP_LOG: ${{ github.workspace }}/build/multi-connector-smoke/app.log
+      LINK_FILE_A: ${{ github.workspace }}/build/multi-connector-smoke/link-a.txt
+      LINK_FILE_B: ${{ github.workspace }}/build/multi-connector-smoke/link-b.txt
+      STATE_DIR: ${{ github.workspace }}/build/multi-connector-smoke/states
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/multi-connector-smoke/xdg-config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/multi-connector-smoke/xdg-data
+      PEER_LABEL_A: 'Pixel-A'
+      PEER_LABEL_B: 'Pixel-B'
+      DESKTOP_LABEL: 'Multi Smoke Desktop'
     # Track octi-server's rolling canary tag so this job surfaces wire-format drift the day it
     # lands on octi-server main, without anyone needing to bump a pinned digest. Trade-off: a
     # failure here may indicate either a desktop regression OR an upstream change — check
@@ -111,11 +128,21 @@ jobs:
       - name: Setup project and build environment
         uses: ./.github/actions/common-setup
 
+      - name: Install runtime smoke dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils xauth xfonts-base \
+            libsecret-tools gnome-keyring dbus-x11 \
+            python3
+
       - name: Wait for sync-servers
         shell: bash
         run: |
           set -euo pipefail
-          for url in http://127.0.0.1:18080/v1/status http://127.0.0.1:18081/v1/status; do
+          for url in "$SYNC_SERVER_URL/v1/status" "$SYNC_SERVER_URL_B/v1/status"; do
             ready=0
             for attempt in $(seq 1 30); do
               if curl -sf "$url" > /dev/null; then
@@ -135,15 +162,133 @@ jobs:
 
       - name: Run smoke suite
         env:
-          SMOKE_SERVER_URL: http://127.0.0.1:18080
-          SMOKE_SERVER_URL_B: http://127.0.0.1:18081
+          SMOKE_SERVER_URL: ${{ env.SYNC_SERVER_URL }}
+          SMOKE_SERVER_URL_B: ${{ env.SYNC_SERVER_URL_B }}
         run: ./gradlew smokeTest
+
+      - name: Start D-Bus session + unlock gnome-keyring
+        shell: bash
+        run: |
+          set -euo pipefail
+          eval "$(dbus-launch --sh-syntax)"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID" >> "$GITHUB_ENV"
+          printf '\n' | gnome-keyring-daemon --daemonize --unlock --components=secrets >/dev/null
+          echo -n "probe-value" | secret-tool store --label=probe service multi-connector-smoke key probe
+          got=$(secret-tool lookup service multi-connector-smoke key probe)
+          [[ "$got" == "probe-value" ]] || { echo "::error::secret-tool round-trip failed: '$got'" >&2; exit 1; }
+          secret-tool clear service multi-connector-smoke key probe
+          echo "gnome-keyring + secret-tool round-trip OK"
+
+      - name: Start Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNTIME_DIR"
+          Xvfb :99 -screen 0 1200x820x24 -ac -nolisten tcp >"$RUNTIME_DIR/xvfb.log" 2>&1 &
+          echo $! > "$RUNTIME_DIR/xvfb.pid"
+          for attempt in $(seq 1 20); do
+            if xdpyinfo >/dev/null 2>&1; then
+              echo "Xvfb up after ${attempt} attempts"
+              exit 0
+            fi
+            if [[ ! -d /proc/$(cat "$RUNTIME_DIR/xvfb.pid") ]]; then
+              echo "::error::Xvfb process exited before reaching ready state" >&2
+              cat "$RUNTIME_DIR/xvfb.log" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::Xvfb did not respond on :99 within 20s" >&2
+          cat "$RUNTIME_DIR/xvfb.log" >&2 || true
+          exit 1
+
+      - name: Seed two phantom peers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNTIME_DIR"
+          ./gradlew --no-daemon bootstrapScreenshotPeer \
+            --args="--server $SYNC_SERVER_URL --label $PEER_LABEL_A --output $LINK_FILE_A"
+          ./gradlew --no-daemon bootstrapScreenshotPeer \
+            --args="--server $SYNC_SERVER_URL_B --label $PEER_LABEL_B --output $LINK_FILE_B"
+
+      - name: Build runnable distributable
+        shell: bash
+        run: ./gradlew --no-daemon createDistributable
+
+      - name: Launch desktop app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+          : > "$APP_LOG"
+          nohup ./build/compose/binaries/main/app/Octi/bin/Octi \
+            --enable-debug-rpc --debug-rpc-port "$RPC_PORT" \
+            >"$APP_LOG" 2>&1 &
+          echo $! > "$RUNTIME_DIR/app.pid"
+
+      - name: Run multi-connector runtime smoke
+        shell: bash
+        run: ./.github/scripts/multi-connector-smoke.sh
+
+      - name: Restart desktop app
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$RUNTIME_DIR/app.pid" ]]; then
+            kill "$(cat "$RUNTIME_DIR/app.pid")" || true
+          fi
+          for _ in $(seq 1 20); do
+            if [[ ! -f "$RUNTIME_DIR/app.pid" ]] || ! kill -0 "$(cat "$RUNTIME_DIR/app.pid")" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ -f "$RUNTIME_DIR/app.pid" ]] && kill -0 "$(cat "$RUNTIME_DIR/app.pid")" 2>/dev/null; then
+            echo "::warning::desktop process did not stop after SIGTERM; sending SIGKILL"
+            kill -9 "$(cat "$RUNTIME_DIR/app.pid")" || true
+          fi
+          printf '\n==== restart for persisted multi-connector smoke ====\n' >> "$APP_LOG"
+          nohup ./build/compose/binaries/main/app/Octi/bin/Octi \
+            --enable-debug-rpc --debug-rpc-port "$RPC_PORT" \
+            >>"$APP_LOG" 2>&1 &
+          echo $! > "$RUNTIME_DIR/app.pid"
+
+      - name: Verify persisted multi-connector state
+        shell: bash
+        env:
+          MULTI_CONNECTOR_SKIP_LINK: '1'
+        run: ./.github/scripts/multi-connector-smoke.sh
+
+      - name: Stop desktop app and Xvfb
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [[ -f "$RUNTIME_DIR/app.pid" ]]; then
+            kill "$(cat "$RUNTIME_DIR/app.pid")" || true
+          fi
+          if [[ -f "$RUNTIME_DIR/xvfb.pid" ]]; then
+            kill "$(cat "$RUNTIME_DIR/xvfb.pid")" || true
+          fi
 
       - name: Dump sync-server logs on failure
         if: failure()
         run: |
           docker logs ${{ job.services.sync-server.id }} || true
           docker logs ${{ job.services.sync-server-b.id }} || true
+
+      - name: Upload runtime smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: multi-connector-runtime-smoke
+          path: |
+            build/multi-connector-smoke/app.log
+            build/multi-connector-smoke/xvfb.log
+            build/multi-connector-smoke/states
+          if-no-files-found: warn
 
       - name: Upload smoke test results
         if: always()
