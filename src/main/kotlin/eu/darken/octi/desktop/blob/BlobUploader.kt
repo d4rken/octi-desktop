@@ -5,10 +5,10 @@ import eu.darken.octi.desktop.common.log.Logging.Priority.INFO
 import eu.darken.octi.desktop.common.log.Logging.Priority.WARN
 import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
-import eu.darken.octi.desktop.di.AppGraph
 import eu.darken.octi.desktop.protocol.encryption.EncryptionMode
 import eu.darken.octi.desktop.protocol.encryption.StreamingPayloadCipher
 import eu.darken.octi.desktop.protocol.module.ModuleId
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
 import eu.darken.octi.desktop.protocol.octiserver.dto.CreateSessionRequest
 import eu.darken.octi.desktop.protocol.octiserver.dto.FinalizeSessionRequest
 import eu.darken.octi.desktop.protocol.sync.DeviceId
@@ -42,7 +42,7 @@ private val TAG = logTag("Blob", "Uploader")
  * Returns the server's blob id (for FileShareInfo.SharedFile.connectorRefs) plus the plaintext
  * checksum (for FileShareInfo.SharedFile.checksum).
  */
-class BlobUploader(private val graph: AppGraph) {
+class BlobUploader {
 
     sealed class Result {
         data class Ok(
@@ -60,18 +60,20 @@ class BlobUploader(private val graph: AppGraph) {
     }
 
     suspend fun upload(
+        connector: OctiServerConnector,
         ownerDeviceId: DeviceId,
         moduleId: ModuleId,
         blobKey: String,
         sourceFile: Path,
     ): Result {
-        val connector = graph.primaryConnector.value ?: return Result.NoClient
         val client = connector.client
         val credentials = connector.credentials
 
         val mode = EncryptionMode.fromTypeString(credentials.encryptionKeyset.type)
         if (mode != EncryptionMode.AES256_GCM_SIV) {
-            log(TAG, WARN) { "Refusing upload: legacy keyset (${credentials.encryptionKeyset.type})" }
+            log(TAG, WARN) {
+                "Refusing upload to ${connector.identifier.logLabel}: legacy keyset (${credentials.encryptionKeyset.type})"
+            }
             return Result.LegacyKeysetNotSupported
         }
 

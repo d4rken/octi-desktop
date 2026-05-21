@@ -9,7 +9,9 @@ import eu.darken.octi.desktop.modules.files.FileShareRepo
 import eu.darken.octi.desktop.protocol.encryption.EncryptionMode
 import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.files.FileShareInfo
+import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
+import eu.darken.octi.desktop.protocol.sync.RemoteBlobRef
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -93,9 +95,9 @@ class FilesViewModel(
     }
 
     fun download(file: FileShareInfo.SharedFile, destination: Path) {
-        val connectorIdString = currentConnectorIdString() ?: return
-        val serverBlobId = file.connectorRefs[connectorIdString]?.value ?: run {
-            setAction(file.blobKey, Action.Failed("This connector doesn't have a copy of the blob"))
+        val sources = downloadSourcesFor(file)
+        if (sources.isEmpty()) {
+            setAction(file.blobKey, Action.Failed("No reachable connector has a copy of this blob"))
             return
         }
         graph.appScope.launch {
@@ -104,7 +106,7 @@ class FilesViewModel(
                 ownerDeviceId = targetDeviceId,
                 moduleId = ModuleIds.FILES,
                 blobKey = file.blobKey,
-                serverBlobId = serverBlobId,
+                sources = sources,
                 expectedChecksumHex = file.checksum,
                 destinationFile = destination,
             )
@@ -120,6 +122,30 @@ class FilesViewModel(
             }
             setAction(file.blobKey, outcome)
         }
+    }
+
+    /**
+     * Build the ordered `(ConnectorId → serverBlobId)` map for [BlobDownloader.download].
+     * Iteration order matters — the downloader tries sources in order — so we prefer
+     * connectors that are not paused (paused ones can still serve if needed, but skip them
+     * first; they're not refreshing their device list / WS) and within that, deterministic
+     * order by idString.
+     */
+    private fun downloadSourcesFor(file: FileShareInfo.SharedFile): Map<ConnectorId, String> {
+        val active = graph.activeConnectors.value.associateBy { it.identifier.idString }
+        val running = graph.runningConnectors.value.map { it.identifier.idString }.toSet()
+        val matched: List<Pair<ConnectorId, RemoteBlobRef>> = file.connectorRefs
+            .mapNotNull { (idString, ref) ->
+                val connector = active[idString] ?: return@mapNotNull null
+                connector.identifier to ref
+            }
+        // Running connectors first, then paused (which we still try as a last resort since
+        // the blob really is there — pause silences sync activity, not blob serving).
+        val ordered = matched.sortedWith(
+            compareByDescending<Pair<ConnectorId, RemoteBlobRef>> { it.first.idString in running }
+                .thenBy { it.first.idString },
+        )
+        return ordered.associate { (id, ref) -> id to ref.value }
     }
 
     fun requestDeletion(file: FileShareInfo.SharedFile) {
@@ -147,14 +173,19 @@ class FilesViewModel(
         _state.value = _state.value.copy(actions = _state.value.actions + (key to action))
     }
 
+    /**
+     * "Can we even attempt an upload?" → true only if NO running connector has a GCM-SIV
+     * keyset. Mixed legacy + GCM-SIV is fine: upload fans out to the GCM-SIV ones, peers see
+     * the blob from whichever connector they're polling. All-legacy means file sharing is off
+     * for this account combination.
+     */
     private fun isLegacyKeyset(): Boolean {
-        val credentials = graph.primaryConnector.value?.credentials ?: return false
-        return EncryptionMode.fromTypeString(credentials.encryptionKeyset.type) != EncryptionMode.AES256_GCM_SIV
+        val running = graph.runningConnectors.value
+        if (running.isEmpty()) return false
+        return running.none {
+            EncryptionMode.fromTypeString(it.credentials.encryptionKeyset.type) == EncryptionMode.AES256_GCM_SIV
+        }
     }
-
-    private fun currentConnectorIdString(): String? =
-        graph.primaryConnector.value?.identifier?.idString
-
 }
 
 data class FilesUiState(
