@@ -147,6 +147,35 @@ tasks.test {
     )
 }
 
+// Regenerate the canonical octi-desktop fixtures under src/test/resources/interop/published/.
+// Mirrors app-main's :sync-core:generateInteropFixtures wrapper. The actual generator is a
+// `@EnabledIfSystemProperty` test that's normally skipped — this task flips the flag and
+// scopes the run to that single class so the rest of the suite isn't pulled in.
+tasks.register<Test>("generateDesktopFixtures") {
+    description = "Regenerate src/test/resources/interop/published/* from canonical inputs in " +
+        "InteropFixtureGenerator. Same Java source set as `test`."
+    group = "verification"
+    val source = tasks.test.get()
+    testClassesDirs = source.testClassesDirs
+    classpath = source.classpath
+    useJUnitPlatform()
+    filter {
+        includeTestsMatching(
+            "eu.darken.octi.desktop.protocol.encryption.interop.published.InteropFixtureGeneratorTest",
+        )
+        // If the class is renamed/removed, fail loudly instead of silently no-op'ing.
+        isFailOnNoMatchingTests = true
+    }
+    systemProperty("generateInteropFixtures", "true")
+    systemProperty(
+        "interopFixturesOutDir",
+        layout.projectDirectory.dir("src/test/resources/interop/published").asFile.absolutePath,
+    )
+    // The regenerator is a side-effecting task that writes JSON to disk. Skipping it as
+    // UP-TO-DATE would silently leave the committed fixtures stale.
+    outputs.upToDateWhen { false }
+}
+
 val smokeTestSourceSet = sourceSets.create("smokeTest") {
     compileClasspath += sourceSets["main"].output
     runtimeClasspath += output + compileClasspath

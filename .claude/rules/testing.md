@@ -118,6 +118,37 @@ If you also touch `StreamingPayloadCipher` or `PayloadEncryption`, expect `Inter
 to catch the wire-compat break before the smoke suite does. If you touch one of the modules
 listed above on web, expect `Web*InteropTest` to flag the change here at the consumer side.
 
+### Publishing canonical fixtures (Phase C1 onward)
+
+Desktop is also a **producer**. Canonical payloads desktop emits for `meta`,
+`clipboard`, and `files` are committed under
+`src/test/resources/interop/published/` for app-main and octi-web to consume.
+
+Owners:
+- `InteropFixtureGenerator` — pure builder + canonical typed inputs per vector.
+- `InteropFixtureSelfVerifyTest` — always-on round-trip gate. Re-runs the
+  generator on every `./gradlew test` and asserts the committed JSON files
+  match byte-for-byte.
+- `InteropFixtureGeneratorTest` — `@EnabledIfSystemProperty`-gated regenerator.
+  Disabled on plain `./gradlew test`; the Gradle task below flips the gate
+  and writes the freshly-built bytes to disk.
+
+Regenerate via:
+
+```bash
+./gradlew generateDesktopFixtures
+```
+
+The task scopes to the single regenerator test class and forces a re-run
+(`outputs.upToDateWhen { false }`). If a canonical input in
+`InteropFixtureGenerator` changes (or the serializer's output drifts), the
+self-verify test fails on the next `./gradlew test` — regenerate and commit
+in the same PR. Don't commit hand-edited fixture JSON.
+
+Power and connectivity modules are deliberately omitted from the producer
+fixture set: desktop reads them (UI tiles) but doesn't emit them. Add a
+vector here only if/when desktop gains a writer for that module.
+
 ## Behavior fixtures vs. enumeration
 
 Drift between `app-desktop` and `app-main` is held back by **behavior fixtures**, not exhaustive field enumeration. Prefer:
