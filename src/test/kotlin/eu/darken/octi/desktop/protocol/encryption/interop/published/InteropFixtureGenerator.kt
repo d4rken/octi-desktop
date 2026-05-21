@@ -1,5 +1,6 @@
 package eu.darken.octi.desktop.protocol.encryption.interop.published
 
+import eu.darken.octi.desktop.protocol.encryption.PayloadEncryption
 import eu.darken.octi.desktop.protocol.encryption.interop.InteropFixtures
 import eu.darken.octi.desktop.protocol.encryption.interop.PublishedModuleFixture
 import eu.darken.octi.desktop.protocol.encryption.interop.PublishedVector
@@ -7,11 +8,12 @@ import eu.darken.octi.desktop.protocol.module.ModuleIds
 import eu.darken.octi.desktop.protocol.modules.clipboard.ClipboardInfo
 import eu.darken.octi.desktop.protocol.modules.files.FileShareInfo
 import eu.darken.octi.desktop.protocol.modules.meta.MetaInfo
+import eu.darken.octi.desktop.protocol.octiserver.OctiServer
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector.Companion.toConnectorId
 import eu.darken.octi.desktop.protocol.serialization.Serialization
-import eu.darken.octi.desktop.protocol.sync.ConnectorId
-import eu.darken.octi.desktop.protocol.sync.ConnectorType
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.protocol.sync.RemoteBlobRef
+import okio.ByteString
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -60,20 +62,27 @@ internal object InteropFixtureGenerator {
     private const val FAUX_ACCOUNT_PROD = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
     private const val FAUX_ACCOUNT_BETA = "cccccccc-1111-2222-3333-444444444444"
 
-    // Connector IDs derived through the production ConnectorId construction (subtype=domain,
-    // account=uuid). A future change to ConnectorId.idString format or to ConnectorType's
-    // wire constant `kserver` propagates into these fixtures, and the producer self-check
-    // trips on regen. Hardcoding the literal would let the format drift silently.
-    private val FAUX_CONNECTOR: String = ConnectorId(
-        type = ConnectorType.OCTISERVER,
-        subtype = "prod.kserver.octi.darken.eu",
-        account = FAUX_ACCOUNT_PROD,
-    ).idString
-    private val FAUX_CONNECTOR_BETA: String = ConnectorId(
-        type = ConnectorType.OCTISERVER,
-        subtype = "beta.kserver.octi.darken.eu",
-        account = FAUX_ACCOUNT_BETA,
-    ).idString
+    // Connector IDs derived through the SAME function FileShareRepo + MetaWriter use to mint
+    // their `connectorRefs`/`availableOn` keys — `OctiServer.Credentials.toConnectorId()`.
+    // Routing through the production function means a future format change in `toConnectorId()`
+    // (or in ConnectorId.idString) propagates into these fixtures, and the producer self-check
+    // trips on regen. Hardcoding a literal — or even calling `ConnectorId(...)` directly —
+    // would let the format drift silently. The encryptionKeyset isn't read by toConnectorId()
+    // so an empty placeholder is enough.
+    private fun fauxConnectorId(domain: String, accountId: String): String {
+        val placeholderKeyset = PayloadEncryption.KeySet(type = "AES256_GCM_SIV", key = ByteString.EMPTY)
+        return OctiServer.Credentials(
+            serverAdress = OctiServer.Address(domain = domain),
+            accountId = OctiServer.Credentials.AccountId(id = accountId),
+            devicePassword = OctiServer.Credentials.DevicePassword(password = "placeholder"),
+            encryptionKeyset = placeholderKeyset,
+        ).toConnectorId().idString
+    }
+
+    private val FAUX_CONNECTOR: String =
+        fauxConnectorId(domain = "prod.kserver.octi.darken.eu", accountId = FAUX_ACCOUNT_PROD)
+    private val FAUX_CONNECTOR_BETA: String =
+        fauxConnectorId(domain = "beta.kserver.octi.darken.eu", accountId = FAUX_ACCOUNT_BETA)
 
     private val META_VECTORS: List<Pair<String, MetaInfo>> = listOf(
         // "full" — every field desktop ACTUALLY emits at publish time. Real MetaWriter sets

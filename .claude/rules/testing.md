@@ -118,6 +118,29 @@ If you also touch `StreamingPayloadCipher` or `PayloadEncryption`, expect `Inter
 to catch the wire-compat break before the smoke suite does. If you touch one of the modules
 listed above on web, expect `Web*InteropTest` to flag the change here at the consumer side.
 
+### Upstream gating (this repo's CI)
+
+`.github/workflows/cross-repo-verify.yml` runs on every PR. On PRs that touch the
+allowlisted wire-format paths (`protocol/modules/`, `protocol/sync/`,
+`protocol/serialization/`, `protocol/module/`,
+`src/test/kotlin/.../interop/published/`, `src/test/resources/interop/published/`,
+and the workflow itself), it checks out app-main and octi-web at their default
+branches and runs their consumer suites against this PR's HEAD using the
+`INTEROP_FIXTURE_OVERRIDES` env var the consumer sync code already accepts.
+Sister gates: app-main's `cross-repo-verify.yml` (A3) and octi-web's (B4) fire
+the same shape from their own directions.
+
+A wire-incompatible serializer change is blocked at the octi-desktop PR, not
+discovered later when a consumer happens to bump its pin. PRs that don't touch
+the allowlist still run the workflow but echo "no wire-format-relevant paths
+changed; consumer verify will be skipped." and exit 0 — required-check status
+reports green without leaving the check pending.
+
+Fork PR limitation: cross-repo `actions/checkout` of `head.sha` only works for
+same-repo branches; fork PRs get a clean failure from the consumer's
+`raw.githubusercontent.com` fetch (returns 404 against the upstream's path).
+Same constraint as the sister workflows.
+
 ### Publishing canonical fixtures (Phase C1 onward)
 
 Desktop is also a **producer**. Canonical payloads desktop emits for `meta`,
