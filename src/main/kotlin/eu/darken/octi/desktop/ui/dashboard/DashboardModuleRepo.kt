@@ -44,7 +44,7 @@ private val TAG = logTag("UI", "DashboardModuleRepo")
  * sync layer.
  */
 sealed class ModuleState<out T> {
-    /** Before the first read completes, OR after `primaryConnector` flips to null. */
+    /** Before the first read completes, OR when `activeConnectors` is empty (no link). */
     data object Loading : ModuleState<Nothing>()
 
     /** Server returned 204 / NotFound — peer hasn't written this module. Render per [NotFoundPolicy]. */
@@ -79,13 +79,17 @@ sealed class ModuleState<out T> {
  *   - clipboard → `ClipboardSync.lastPushedInfo`
  *   - files → `FileShareRepo.ownFiles`
  *   - other own modules → `NotFound` (desktop doesn't collect them yet).
- * - **Polling-fallback re-reads**: while `webSocketClient.state == PollingFallback`, a periodic
- *   job kicks every observed (non-self) slice every [pollingRefreshInterval]. Stops when the
- *   state leaves `PollingFallback`.
+ * - **Polling-fallback re-reads**: while ANY connector is in `PollingFallback`, a periodic job
+ *   kicks every observed (non-self) slice every [pollingRefreshInterval]. Stops when no
+ *   connector is in `PollingFallback`. Under multi-connector this is "if any connector lost
+ *   its WS, refresh tiles periodically so peers visible only via that connector still update";
+ *   `ModuleResolver` would still resolve from the non-fallback connector but the kick keeps
+ *   stale tiles from sitting there.
  * - **Eviction**: when a device disappears from `deviceListRepo.devices`, we drop its slices
  *   from the cache.
- * - **Active-connector transitions**: when `primaryConnector` flips, we kick all slices. The slice
- *   itself sees the null client and emits `Loading`; on relink the next kick hydrates.
+ * - **Active-connector transitions**: when `activeConnectors` changes (link, unlink, pause
+ *   toggle), we kick all slices. The slice itself sees the empty set and emits `Loading` if
+ *   nothing's linked; otherwise the next kick hydrates from whichever connector is freshest.
  */
 class DashboardModuleRepo(
     private val graph: AppGraph,
@@ -133,10 +137,14 @@ class DashboardModuleRepo(
                     .launchIn(this)
             }
 
-            // Active-connector transitions: kick everyone (slice itself sees the null and emits
-            // Loading; on relink the next kick hydrates).
+            // Active-connector transitions: kick everyone on any link/unlink/pause toggle. The
+            // slice itself sees an empty set and emits Loading, or a non-empty set and reads
+            // via ModuleResolver across whatever sources are active. Distinct on size so a
+            // reorder-only change doesn't trigger redundant kicks.
             launch {
-                graph.primaryConnector
+                graph.activeConnectors
+                    .map { it.size }
+                    .distinctUntilChanged()
                     .onEach { slices.values.forEach { it.kick() } }
                     .launchIn(this)
             }
@@ -154,12 +162,18 @@ class DashboardModuleRepo(
                     .launchIn(this)
             }
 
-            // Polling-fallback periodic refresh.
+            // Polling-fallback periodic refresh. Fires when ANY connector is in PollingFallback
+            // — under multi-connector, a single lost-WS connector is enough to risk stale tiles
+            // for peers visible only through it. ModuleResolver would still resolve from the
+            // non-fallback connector if reachable, but the periodic kick keeps everything fresh.
             launch {
-                graph.webSocketClient.state
-                    .onEach { state ->
-                        val isFallback = state is OctiServerWebSocketClient.ConnectionState.PollingFallback
-                        if (isFallback && pollingJob == null) {
+                graph.webSocketClient.statesByConnector
+                    .map { states ->
+                        states.values.any { it is OctiServerWebSocketClient.ConnectionState.PollingFallback }
+                    }
+                    .distinctUntilChanged()
+                    .onEach { anyInFallback ->
+                        if (anyInFallback && pollingJob == null) {
                             pollingJob = scope.launch {
                                 while (true) {
                                     delay(pollingRefreshInterval.inWholeMilliseconds)
@@ -167,7 +181,7 @@ class DashboardModuleRepo(
                                 }
                             }
                             log(TAG, DEBUG) { "WS in PollingFallback — periodic tile refresh started" }
-                        } else if (!isFallback && pollingJob != null) {
+                        } else if (!anyInFallback && pollingJob != null) {
                             pollingJob?.cancel()
                             pollingJob = null
                             log(TAG, DEBUG) { "WS recovered — periodic tile refresh stopped" }
@@ -266,7 +280,10 @@ class DashboardModuleRepo(
             )
 
         private suspend fun readOnce(): ModuleState<T> {
-            if (graph.primaryConnector.value == null) return ModuleState.Loading
+            // No linked connectors → can't read anything yet. ModuleResolver would return
+            // Error("no candidates") which we'd then map to ModuleState.Error; short-circuiting
+            // here keeps the empty-state visually consistent with cold start.
+            if (graph.activeConnectors.value.isEmpty()) return ModuleState.Loading
             return readSemaphore.withPermit {
                 try {
                     when (val result = graph.moduleReader.read(spec.moduleId, deviceId, spec.serializer)) {

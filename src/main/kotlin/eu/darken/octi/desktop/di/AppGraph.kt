@@ -33,7 +33,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -54,10 +53,10 @@ private val TAG = logTag("AppGraph")
  * owns its own Ktor HttpClient via the wrapping [OctiServerConnector]; on unlink the connector
  * is removed and its `close()` tears the client down.
  *
- * Multi-connector ready: [activeConnectors] is a list, [primaryConnector] is a derived helper
- * for the (today 0-or-1) common case. When a second connector type lands (GDrive) only the
- * sync-layer collectors that iterate connectors change shape; the list-based plumbing is
- * already in place.
+ * Multi-connector aware: [activeConnectors] is the canonical list of linked connectors;
+ * [runningConnectors] filters out the paused ones for poll/write loops. Consumers that need
+ * "any connector at all?" check `activeConnectors.value.isEmpty()` directly. The earlier
+ * `primaryConnector` helper was removed once every consumer migrated.
  *
  * The passphrase prompt for the keystore fallback is wired here too — it's invoked lazily by
  * [KeystoreFactory] only when no OS keystore is available.
@@ -75,19 +74,6 @@ class AppGraph private constructor(
 
     private val _activeConnectors = MutableStateFlow(initialConnectors)
     val activeConnectors: StateFlow<List<OctiServerConnector>> = _activeConnectors.asStateFlow()
-
-    /**
-     * Convenience for the common case of "the only OctiServer connector". Transitional during
-     * the multi-connector rollout — fan-out writers (PR-4) and the multi-source resolver (PR-3)
-     * iterate [activeConnectors] / [runningConnectors] instead. Legitimate remaining usages are
-     * single-account UI surfaces that explicitly want "the first linked connector" semantics.
-     */
-    @Deprecated(
-        message = "Transitional during multi-connector rollout; prefer iterating activeConnectors or runningConnectors.",
-    )
-    val primaryConnector: StateFlow<OctiServerConnector?> = activeConnectors
-        .map { it.firstOrNull() }
-        .stateIn(appScope, SharingStarted.Eagerly, initialConnectors.firstOrNull())
 
     /**
      * Linked connectors that are NOT paused. Polling loops (DeviceListRepo), websocket sessions
@@ -255,12 +241,14 @@ class AppGraph private constructor(
         debugActions.registerUiAction(
             DebugActionRegistry.Metadata(
                 name = "account.unlink",
-                description = "Unlink the primary connector: calls DELETE /v1/devices/{self} then " +
-                    "clears local credentials + settings entry. Returns the UnlinkResult variant " +
-                    "name so callers can branch on Success / NetworkError.",
+                description = "Unlink the first linked connector: calls DELETE /v1/devices/{self} " +
+                    "then clears local credentials + settings entry. Returns the UnlinkResult " +
+                    "variant name so callers can branch on Success / NetworkError. With multiple " +
+                    "connectors, this targets the first in activeConnectors — the screenshot CI " +
+                    "flow only ever sets up one, so 'first' is unambiguous there.",
             ),
         ) {
-            val target = primaryConnector.value?.identifier
+            val target = activeConnectors.value.firstOrNull()?.identifier
             val result = if (target == null) UnlinkResult.NotLinked else unlink(target)
             buildJsonObject {
                 put("result", JsonPrimitive(result::class.simpleName ?: "Unknown"))
