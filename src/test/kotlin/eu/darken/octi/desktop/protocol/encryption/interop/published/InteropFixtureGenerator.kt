@@ -9,7 +9,7 @@ import eu.darken.octi.desktop.protocol.modules.clipboard.ClipboardInfo
 import eu.darken.octi.desktop.protocol.modules.files.FileShareInfo
 import eu.darken.octi.desktop.protocol.modules.meta.MetaInfo
 import eu.darken.octi.desktop.protocol.octiserver.OctiServer
-import eu.darken.octi.desktop.protocol.octiserver.toConnectorId
+import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector.Companion.toConnectorId
 import eu.darken.octi.desktop.protocol.serialization.Serialization
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.protocol.sync.RemoteBlobRef
