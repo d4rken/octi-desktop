@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "source": "d4rken-org/octi-desktop",
+  "generator": "src/test/kotlin/.../InteropFixtureGenerator.kt",
+  "files": {
+    "octi-desktop-clipboard.json": {
+      "sha256": "c9eb388822c64b434af08f89354457ff243f81b6586f84dd98cc3fdca9948b31",
+      "byteLength": 953
+    },
+    "octi-desktop-files.json": {
+      "sha256": "1a0afc54f5b731b6ab9db4fc607bac2f22cdcebb2b4379de79e8a38e7cbc79e5",
+      "byteLength": 4935
+    },
+    "octi-desktop-meta.json": {
+      "sha256": "4bf37443c8f4f5c55de35ba24762002b6c74f7993c7fb0366ae502621d9db849",
+      "byteLength": 1779
+    }
+  }
+}

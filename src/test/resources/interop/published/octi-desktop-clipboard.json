@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "module": "eu.darken.octi.module.core.clipboard",
+  "producer": "d4rken-org/octi-desktop",
+  "note": "Canonical ClipboardInfo payloads octi-desktop emits. Pin: type+data base64 wire shape.",
+  "vectors": [
+    {
+      "name": "EMPTY",
+      "payloadJson": "{\"type\":\"EMPTY\",\"data\":\"\"}",
+      "sha256": "c84c71ede654e55121f94b97ff7739b3969dc4a339434dd72fbade809529e582",
+      "byteLength": 26
+    },
+    {
+      "name": "SIMPLE_TEXT_short",
+      "payloadJson": "{\"type\":\"SIMPLE_TEXT\",\"data\":\"aGVsbG8gZnJvbSBkZXNrdG9w\"}",
+      "sha256": "72a88dbd9d192b5019f098826bbf4a85b2c5ad0496866c24bc5a1f28f0fe8550",
+      "byteLength": 56
+    },
+    {
+      "name": "SIMPLE_TEXT_unicode",
+      "payloadJson": "{\"type\":\"SIMPLE_TEXT\",\"data\":\"Y2Fmw6kg8J+RiyDkvaDlpb0g4oCUINin2YTYudix2KjZitip\"}",
+      "sha256": "f4a8aa4ac9f4954770be96ce8c6acc2686f1eee75c7a28b7150396884c984d0b",
+      "byteLength": 80
+    }
+  ]
+}

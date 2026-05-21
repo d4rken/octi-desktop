@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "module": "eu.darken.octi.module.core.meta",
+  "producer": "d4rken-org/octi-desktop",
+  "note": "Canonical MetaInfo payloads octi-desktop emits. Consumers (octi, octi-web) must decode each `payloadJson` through their MetaInfo decoder.",
+  "vectors": [
+    {
+      "name": "full",
+      "payloadJson": "{\"deviceLabel\":\"Test Desktop\",\"deviceId\":{\"id\":\"22222222-3333-4444-5555-666666666666\"},\"octiVersionName\":\"0.0.0-test\",\"octiGitSha\":\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\"deviceManufacturer\":\"Eclipse Adoptium\",\"deviceName\":\"octi-test-host\",\"deviceType\":\"DESKTOP\",\"deviceBootedAt\":\"2026-05-01T10:00:00Z\",\"osType\":\"Linux\",\"osVersionName\":\"6.8.0\"}",
+      "sha256": "fc3166bfb33ae03bc0e73e70606c6c4ce3dcbeddad876ca9e3aadcd054afd9c9",
+      "byteLength": 348
+    },
+    {
+      "name": "minimal",
+      "payloadJson": "{\"deviceId\":{\"id\":\"22222222-3333-4444-5555-666666666666\"},\"octiVersionName\":\"0.0.0-test\",\"octiGitSha\":\"desktop-dev\",\"deviceManufacturer\":\"Eclipse Adoptium\",\"deviceName\":\"octi-desktop\",\"deviceType\":\"DESKTOP\"}",
+      "sha256": "20c647202194a12446d6cb901f3ceea3223b1a2a155eeb774bdf65e1440b09f3",
+      "byteLength": 207
+    },
+    {
+      "name": "unicode-label",
+      "payloadJson": "{\"deviceLabel\":\"デスクトップ 🖥 العربية\",\"deviceId\":{\"id\":\"22222222-3333-4444-5555-666666666666\"},\"octiVersionName\":\"0.0.0-test\",\"octiGitSha\":\"desktop-dev\",\"deviceManufacturer\":\"Eclipse Adoptium\",\"deviceName\":\"octi-desktop\",\"deviceType\":\"DESKTOP\",\"deviceBootedAt\":\"2026-05-01T10:00:00Z\",\"osType\":\"Linux\"}",
+      "sha256": "065b8a0dc43a367ecfd60f9ad074bb584c0c7dba9e3b693ba24ea21d22105341",
+      "byteLength": 319
+    }
+  ]
+}
