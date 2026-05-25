@@ -96,7 +96,19 @@ navigation.go                — jump to "linking" | "dashboard" | "clipboard" |
 linking.submit               — submit a share code as if pasted on the Linking screen
 account.unlink               — unlink the primary connector (server DELETE + clear local creds + settings entry)
 settings.themeMode           — override the theme (SYSTEM | LIGHT | DARK); used by screenshot CI
+settings.deviceLabel         — override the desktop's device label (empty string clears it)
+settings.pause               — pause/resume one connector by idString {connectorId, paused}; throws connector_not_found on unknown id
+module.read                  — read+decrypt a device's module via ModuleReader {deviceId, moduleId: meta|clipboard|power} → {state, module}
+files.share                  — share a local file, fanning the blob out across connectors {path} → {blobKey, connectorRefs, connectorRefCount, committedConnectorCount}
+files.download               — download a shared file by blobKey {deviceId, blobKey, destination} → {result, servedBy, sizeBytes}
 ```
+
+`settings.pause`, `module.read`, `files.share`, and `files.download` are exercised by the
+multi-connector runtime smoke (`code-checks.yml` → `.github/scripts/multi-connector-smoke.sh`):
+pause-one-keep-the-other, peer module read+decrypt, and own-file multi-source download routing
+(running connector preferred over paused). `files.download`'s `servedBy` is the connector that
+actually served the blob — the smoke pauses the first server and asserts the next download is
+served by the other.
 
 Discover at runtime via `GET /dev/actions` — each entry includes `description`, `params`, and `example`.
 

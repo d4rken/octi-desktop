@@ -4,6 +4,7 @@ import eu.darken.octi.desktop.common.coroutine.AppScope
 import eu.darken.octi.desktop.common.log.Logging
 import eu.darken.octi.desktop.common.log.log
 import eu.darken.octi.desktop.common.log.logTag
+import eu.darken.octi.desktop.blob.BlobDownloader
 import eu.darken.octi.desktop.debug.rpc.DebugActionRegistry
 import eu.darken.octi.desktop.linking.CredentialsStore
 import eu.darken.octi.desktop.linking.LinkController
@@ -13,8 +14,14 @@ import eu.darken.octi.desktop.modules.clipboard.ClipboardSync
 import eu.darken.octi.desktop.modules.files.FileShareRepo
 import eu.darken.octi.desktop.modules.meta.DeviceMetadataProvider
 import eu.darken.octi.desktop.modules.meta.MetaWriter
+import eu.darken.octi.desktop.protocol.module.ModuleId
+import eu.darken.octi.desktop.protocol.module.ModuleIds
+import eu.darken.octi.desktop.protocol.modules.clipboard.ClipboardInfo
+import eu.darken.octi.desktop.protocol.modules.meta.MetaInfo
+import eu.darken.octi.desktop.protocol.modules.power.PowerInfo
 import eu.darken.octi.desktop.protocol.octiserver.OctiServer
 import eu.darken.octi.desktop.protocol.octiserver.OctiServerConnector
+import eu.darken.octi.desktop.protocol.serialization.Serialization
 import eu.darken.octi.desktop.protocol.sync.ConnectorId
 import eu.darken.octi.desktop.protocol.sync.DeviceId
 import eu.darken.octi.desktop.storage.Settings
@@ -26,18 +33,26 @@ import eu.darken.octi.desktop.sync.ModuleResolver
 import eu.darken.octi.desktop.sync.OctiServerWebSocketClient
 import eu.darken.octi.desktop.sync.SyncEventBus
 import eu.darken.octi.desktop.ui.dashboard.DashboardModuleRepo
+import eu.darken.octi.desktop.ui.files.orderBlobDownloadSources
 import eu.darken.octi.desktop.ui.nav.Navigator
 import eu.darken.octi.desktop.ui.nav.Screen
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.nio.file.Files
+import java.nio.file.Path
 
 private val TAG = logTag("AppGraph")
 
@@ -282,6 +297,161 @@ class AppGraph private constructor(
             val label = params["label"]?.jsonPrimitive?.content ?: error("missing label")
             settings.update { it.copy(deviceLabel = label.ifBlank { null }) }
             buildJsonObject { put("label", JsonPrimitive(label)) }
+        }
+
+        debugActions.registerUiAction(
+            DebugActionRegistry.Metadata(
+                name = "settings.pause",
+                description = "Pause or resume a single connector by its idString. Pausing cancels " +
+                    "that connector's WebSocket + poll loops (its webSocketState in /dev/state goes " +
+                    "to Idle) while leaving the others running. Throws connector_not_found if the id " +
+                    "isn't in activeConnectors — setPaused alone silently no-ops on an unknown key.",
+                params = mapOf(
+                    "connectorId" to "string — a connectors[].id from /dev/state",
+                    "paused" to "boolean — true to pause, false to resume",
+                ),
+                example = """{"connectorId":"octiserver-host-acct","paused":true}""",
+            ),
+        ) { params ->
+            val connectorId = params["connectorId"]?.jsonPrimitive?.content ?: error("missing connectorId")
+            val paused = params["paused"]?.jsonPrimitive?.boolean ?: error("missing paused")
+            val target = activeConnectors.value.firstOrNull { it.identifier.idString == connectorId }
+                ?: error("connector_not_found: $connectorId")
+            setPaused(target.identifier, paused)
+            buildJsonObject {
+                put("connectorId", JsonPrimitive(connectorId))
+                put("paused", JsonPrimitive(paused))
+            }
+        }
+
+        debugActions.register(
+            DebugActionRegistry.Metadata(
+                name = "module.read",
+                description = "Read + decrypt a single module for a device through the real " +
+                    "ModuleReader/ModuleResolver path (resolves the freshest connector source and " +
+                    "decrypts with that connector's keyset). Proves a module document actually " +
+                    "decoded — unlike /dev/state knownDevices, which only echoes /v1/devices " +
+                    "registration headers. Returns the decrypted module as JSON.",
+                params = mapOf(
+                    "deviceId" to "string — target device id (own or a peer)",
+                    "moduleId" to "one of: meta|clipboard|power",
+                ),
+                example = """{"deviceId":"<uuid>","moduleId":"meta"}""",
+            ),
+        ) { params ->
+            val deviceId = DeviceId(params["deviceId"]?.jsonPrimitive?.content ?: error("missing deviceId"))
+            when (val moduleId = params["moduleId"]?.jsonPrimitive?.content ?: error("missing moduleId")) {
+                "meta" -> readModuleAsJson(ModuleIds.META, deviceId, MetaInfo.serializer())
+                "clipboard" -> readModuleAsJson(ModuleIds.CLIPBOARD, deviceId, ClipboardInfo.serializer())
+                "power" -> readModuleAsJson(ModuleIds.POWER, deviceId, PowerInfo.serializer())
+                else -> error("unknown moduleId: $moduleId (expected meta|clipboard|power)")
+            }
+        }
+
+        debugActions.register(
+            DebugActionRegistry.Metadata(
+                name = "files.share",
+                description = "Share a local file from this desktop, fanning the blob out to every " +
+                    "running GCM-SIV connector. Returns the minted blobKey, the connectors the blob " +
+                    "landed on (connectorRefs), and committedConnectorCount (how many servers " +
+                    "accepted the FileShareInfo document — distinct from the blob fan-out).",
+                params = mapOf("path" to "string — absolute path to a regular file on this host"),
+                example = """{"path":"/tmp/share.bin"}""",
+            ),
+        ) { params ->
+            val pathStr = params["path"]?.jsonPrimitive?.content ?: error("missing path")
+            val path = Path.of(pathStr)
+            // Minimal guardrail: a clean error instead of an opaque uploader failure on a
+            // directory / missing file. Symlinks are followed deliberately — this is an opt-in
+            // dev tool, not a hardening boundary (see rules/debug-rpc.md threat model).
+            if (!Files.isRegularFile(path)) error("not_a_regular_file: $pathStr")
+            when (val result = fileShareRepo.shareFile(path)) {
+                is FileShareRepo.ShareResult.Ok -> {
+                    val sharedFile = result.sharedFile ?: error("share returned Ok without a SharedFile")
+                    buildJsonObject {
+                        put("result", JsonPrimitive("Ok"))
+                        put("blobKey", JsonPrimitive(sharedFile.blobKey))
+                        put("connectorRefs", buildJsonArray {
+                            sharedFile.connectorRefs.keys.sorted().forEach { add(JsonPrimitive(it)) }
+                        })
+                        put("connectorRefCount", JsonPrimitive(sharedFile.connectorRefs.size))
+                        put("committedConnectorCount", JsonPrimitive(result.committedConnectorCount))
+                    }
+                }
+                else -> error("share_failed: ${result::class.simpleName}")
+            }
+        }
+
+        debugActions.register(
+            DebugActionRegistry.Metadata(
+                name = "files.download",
+                description = "Download a shared file (by blobKey) owned by deviceId to destination, " +
+                    "routing through orderBlobDownloadSources + BlobDownloader exactly like the Files " +
+                    "screen. Returns servedBy — the connector that actually served the blob — so " +
+                    "callers can assert source preference (running connectors win over paused).",
+                params = mapOf(
+                    "deviceId" to "string — owner device id (use the desktop's own id for own shares)",
+                    "blobKey" to "string — blobKey from files.share",
+                    "destination" to "string — absolute path to write the decrypted file to",
+                ),
+                example = """{"deviceId":"<uuid>","blobKey":"<uuid>","destination":"/tmp/dl.bin"}""",
+            ),
+        ) { params ->
+            val ownerDeviceId = DeviceId(params["deviceId"]?.jsonPrimitive?.content ?: error("missing deviceId"))
+            val blobKey = params["blobKey"]?.jsonPrimitive?.content ?: error("missing blobKey")
+            val destination = Path.of(params["destination"]?.jsonPrimitive?.content ?: error("missing destination"))
+            // Poll ownFiles: shareFile writes _ownFiles under a lock, but a concurrent refreshOwn()
+            // can briefly clobber it — retry rather than read a single racy snapshot.
+            val sharedFile = run {
+                repeat(20) {
+                    fileShareRepo.ownFiles.value?.files?.firstOrNull { it.blobKey == blobKey }?.let { return@run it }
+                    delay(100)
+                }
+                null
+            } ?: error("blobKey_not_found: $blobKey")
+            val sources = orderBlobDownloadSources(
+                connectorRefs = sharedFile.connectorRefs,
+                activeConnectorIds = activeConnectors.value.map { it.identifier },
+                runningConnectorIds = runningConnectors.value.map { it.identifier },
+            )
+            val result = fileShareRepo.downloader.download(
+                ownerDeviceId = ownerDeviceId,
+                moduleId = ModuleIds.FILES,
+                blobKey = blobKey,
+                sources = sources,
+                expectedChecksumHex = sharedFile.checksum,
+                destinationFile = destination,
+            )
+            buildJsonObject {
+                put("result", JsonPrimitive(result::class.simpleName ?: "Unknown"))
+                if (result is BlobDownloader.Result.Ok) {
+                    put("servedBy", JsonPrimitive(result.source.idString))
+                    put("sizeBytes", JsonPrimitive(result.sizeBytes))
+                } else {
+                    put("servedBy", JsonNull)
+                }
+            }
+        }
+    }
+
+    /**
+     * Read a module for [deviceId] through [moduleReader] and shape the [ModuleReader.Result] into
+     * the `module.read` response: `{state, module}` on Ok, `{state}` on NotFound, `{state, message}`
+     * on Error. Generic so each module type keeps its own serializer for the round-trip back to JSON.
+     */
+    private suspend fun <T> readModuleAsJson(
+        moduleId: ModuleId,
+        deviceId: DeviceId,
+        serializer: KSerializer<T>,
+    ): JsonObject = when (val result = moduleReader.read(moduleId, deviceId, serializer)) {
+        is ModuleReader.Result.Ok -> buildJsonObject {
+            put("state", JsonPrimitive("Ok"))
+            put("module", Serialization.json.encodeToJsonElement(serializer, result.value))
+        }
+        ModuleReader.Result.NotFound -> buildJsonObject { put("state", JsonPrimitive("NotFound")) }
+        is ModuleReader.Result.Error -> buildJsonObject {
+            put("state", JsonPrimitive("Error"))
+            put("message", JsonPrimitive(result.cause.message ?: result.cause::class.simpleName ?: "error"))
         }
     }
 

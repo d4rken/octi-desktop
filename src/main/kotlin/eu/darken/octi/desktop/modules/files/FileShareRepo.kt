@@ -230,7 +230,7 @@ class FileShareRepo(private val graph: AppGraph) {
                     "Shared file ${sharedFile.name} (blobKey=$blobKey) — blob on ${refs.size} " +
                         "connector(s), document on ${commitOutcome.successCount} connector(s)"
                 }
-                ShareResult.Ok(sharedFile)
+                ShareResult.Ok(sharedFile, committedConnectorCount = commitOutcome.successCount)
             } else {
                 log(TAG, WARN, commitOutcome.firstFailure) { "All FileShareInfo commits failed" }
                 ShareResult.CommitFailed(
@@ -260,7 +260,7 @@ class FileShareRepo(private val graph: AppGraph) {
             val commitOutcome = commitOwnEverywhere(updated)
             if (commitOutcome.anySuccess) {
                 _ownFiles.value = updated
-                ShareResult.Ok(sharedFile = null)
+                ShareResult.Ok(sharedFile = null, committedConnectorCount = commitOutcome.successCount)
             } else {
                 log(TAG, WARN, commitOutcome.firstFailure) { "Deletion-request commit failed on every connector" }
                 ShareResult.CommitFailed(
@@ -350,7 +350,16 @@ class FileShareRepo(private val graph: AppGraph) {
     }
 
     sealed class ShareResult {
-        data class Ok(val sharedFile: FileShareInfo.SharedFile?) : ShareResult()
+        /**
+         * [committedConnectorCount] is how many connectors accepted the FileShareInfo document
+         * PUT — distinct from the blob fan-out count carried by `sharedFile.connectorRefs`. A
+         * partial success (blob on both servers, document on one) still reports
+         * [ShareResult.Ok]; the counts let a caller tell the two fan-outs apart.
+         */
+        data class Ok(
+            val sharedFile: FileShareInfo.SharedFile?,
+            val committedConnectorCount: Int,
+        ) : ShareResult()
         data object NoCredentials : ShareResult()
         data object LegacyKeysetNotSupported : ShareResult()
         data class UploadFailed(val cause: BlobUploader.Result) : ShareResult()
