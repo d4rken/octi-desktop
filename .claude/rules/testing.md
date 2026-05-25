@@ -68,9 +68,65 @@ The smoke suite covers:
 
 If `SMOKE_SERVER_URL` is unset, tests skip cleanly via JUnit assumptions.
 
-## What's intentionally NOT here (yet)
+## Compose UI tests
 
-- Compose UI tests (`runComposeUiTest`) — not wired in this project yet.
+Live in their **own `uiTest` source set** (`src/uiTest/kotlin/`), not in `test`. They render real
+Compose via Skiko, which needs an AWT surface — so they're deliberately kept off the fast,
+headless 3-OS `check` matrix. Mirrors the `smokeTest` split.
+
+```bash
+./gradlew uiTest
+```
+
+Excluded from `./gradlew check` two ways: not added to `check`'s `dependsOn`, **and** registered
+in `kover { currentProject { instrumentation { disabledForTestTasks.add("uiTest") } } }` — Kover
+report tasks otherwise trigger *every* `Test` task, and `check` depends on the Kover reports.
+
+CI runs them in `code-checks.yml`'s `ui-tests` job (ubuntu only) under Xvfb. macOS/Windows runners
+have a window server, but pure-composable rendering doesn't justify the extra runner minutes; a
+cross-OS matrix can be added later if a test ever depends on platform rendering.
+
+### Writing a test
+
+```kotlin
+@file:OptIn(ExperimentalTestApi::class)   // required per file — runComposeUiTest is experimental
+
+class SomethingUiTest {
+    @Test
+    fun `does the thing`() = runComposeUiTest {
+        setOctiContent {                  // helper in UiTestSupport.kt — wraps content in OctiTheme
+            ExistingAccountPane(rawCode = "", onRawCodeChange = {}, onSubmit = {}, isWorking = false)
+        }
+        onNodeWithText("Link this device").assertIsNotEnabled()
+    }
+}
+```
+
+- `runComposeUiTest { }` is the rule-free API — runs under the existing JUnit5 platform, **no**
+  `junit-vintage` and **no** `compose.desktop.uiTestJUnit4`. (Compose 1.7.x import is
+  `androidx.compose.ui.test.runComposeUiTest`, not the `v2` package — that's 1.11+.)
+- Always mount via `setOctiContent { }` — tiles/screens read `MaterialTheme.colorScheme` and throw
+  without a theme ancestor.
+- Prefer **semantic matchers** over text-only selectors: `onNode(hasSetTextAction())` for a text
+  field (avoids matching its label node), `onNode(hasClickAction())` for a clickable card. Avoid
+  adding `Modifier.testTag(...)` to production code just for a test unless a matcher can't isolate
+  the node.
+- For stateful assertions (e.g. "button enables after typing"), the **test must own the state** in
+  `remember { mutableStateOf(...) }` and pass the setter — a plain `var` outside composition won't
+  recompose. No blanket `waitForIdle()`; add it only after `performTextInput` if an assertion is racy.
+
+### Testability convention
+
+The seed targets are **pure composables** (plain state + callbacks): the Linking panes, dashboard
+tiles, settings leaves. Tested composables that would otherwise be `private` are widened to
+`internal` — the `uiTest` compilation is associated with `main` in `build.gradle.kts`
+(`associateWith`) so it has friend access to `internal` declarations (a hand-created source set
+doesn't get this automatically the way the built-in `test` set does).
+
+Full-screen roots (`LinkingScreen`, `DashboardScreen`, …) reach into `LocalAppGraph.current`, and
+`AppGraph` does file + OS-keystore I/O in `create()` with no interface. Testing those needs an
+`AppGraph` seam (interface or test double) — out of scope for the seed; add it when the first
+full-screen test lands.
 
 ## Cross-repo wire-format fixtures (multi-source)
 
@@ -187,6 +243,8 @@ over `assertSerialNameForEveryField`. The behavior fixtures catch real interop b
 ```bash
 ./gradlew test --tests "*DebugRpcConfigTest"
 ./gradlew test --tests "*DebugRpcConfigTest.port zero is rejected"
+# UI tests live in their own task — filter with --tests the same way:
+./gradlew uiTest --tests "*LinkingPanesUiTest"
 ```
 
 ## Context Management

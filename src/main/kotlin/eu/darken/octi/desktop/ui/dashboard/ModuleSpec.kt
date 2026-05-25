@@ -112,11 +112,18 @@ sealed class ModuleSpec<T : Any>(
     )
 
     companion object {
+        // `by lazy`, not eager: a `val entries = listOf(Power, ..., Clipboard, ...)` runs in the
+        // companion's static init. If a nested object (e.g. ModuleSpec.Clipboard) is the FIRST one
+        // touched cold, its `<clinit>` triggers ModuleSpec.<clinit>, which references that same
+        // object before its INSTANCE field is assigned → it reads as null → NPE building the list.
+        // Production never hit this (the dashboard always touches `entries`/Power first), but a tile
+        // rendered in isolation does. Deferring the list off class-init breaks the cycle.
+
         /** Canonical tile order — Power first. Drives the default layout, not the rendered one. */
-        val entries: List<ModuleSpec<*>> = listOf(Power, Wifi, Connectivity, Clipboard, Files, Apps, Meta)
+        val entries: List<ModuleSpec<*>> by lazy { listOf(Power, Wifi, Connectivity, Clipboard, Files, Apps, Meta) }
 
         /** Set of all known module-id strings — used by `TileLayoutConfig.normalize` to prune unknowns. */
-        val allModuleIds: Set<String> = entries.map { it.moduleId.id }.toSet()
+        val allModuleIds: Set<String> by lazy { entries.map { it.moduleId.id }.toSet() }
 
         fun byModuleId(moduleId: ModuleId): ModuleSpec<*>? = entries.firstOrNull { it.moduleId == moduleId }
 

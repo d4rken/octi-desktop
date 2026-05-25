@@ -79,6 +79,85 @@ jobs:
           path: build/reports/tests/test
           if-no-files-found: warn
 
+  # Compose UI tests need an AWT surface + the Skiko software renderer, so they can't ride the
+  # headless build-and-test matrix. They live in a separate `uiTest` source set (excluded from
+  # `check`) and run here under Xvfb on Linux only — macOS/Windows runners have a window server,
+  # but the cross-OS rendering payoff isn't worth the extra runner minutes for pure composables.
+  ui-tests:
+    name: Compose UI tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      DISPLAY: ':99'
+      # Skiko can't get a hardware GL context under Xvfb. The `uiTest` Gradle task also sets this
+      # on the forked test JVM; mirrored here so the requirement is visible at the CI layer.
+      SKIKO_RENDER_API: SOFTWARE
+      RUNTIME_DIR: ${{ github.workspace }}/build/ui-tests
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Install Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils xauth xfonts-base
+
+      - name: Start Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNTIME_DIR"
+          Xvfb :99 -screen 0 1200x820x24 -ac -nolisten tcp >"$RUNTIME_DIR/xvfb.log" 2>&1 &
+          echo $! > "$RUNTIME_DIR/xvfb.pid"
+          for attempt in $(seq 1 20); do
+            if xdpyinfo >/dev/null 2>&1; then
+              echo "Xvfb up after ${attempt} attempts"
+              exit 0
+            fi
+            if [[ ! -d /proc/$(cat "$RUNTIME_DIR/xvfb.pid") ]]; then
+              echo "::error::Xvfb process exited before reaching ready state" >&2
+              cat "$RUNTIME_DIR/xvfb.log" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::Xvfb did not respond on :99 within 20s" >&2
+          cat "$RUNTIME_DIR/xvfb.log" >&2 || true
+          exit 1
+
+      - name: Run Compose UI tests
+        shell: bash
+        run: ./gradlew uiTest
+
+      - name: Stop Xvfb
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [[ -f "$RUNTIME_DIR/xvfb.pid" ]]; then
+            kill "$(cat "$RUNTIME_DIR/xvfb.pid")" || true
+          fi
+
+      - name: Upload UI test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: ui-test-results
+          path: |
+            build/reports/tests/uiTest
+            build/ui-tests/xvfb.log
+          if-no-files-found: warn
+
   smoke:
     name: Smoke (real sync-server)
     runs-on: ubuntu-24.04

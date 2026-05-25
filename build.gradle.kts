@@ -203,6 +203,52 @@ tasks.register<Test>("smokeTest") {
     outputs.upToDateWhen { false }
 }
 
+// Compose UI tests (runComposeUiTest). Separate source set so the fast `check` matrix stays
+// headless — these need an AWT surface (Xvfb on Linux) + the Skiko software renderer, which the
+// 3-OS unit run deliberately doesn't carry. Run via `./gradlew uiTest`; CI drives them under Xvfb
+// in code-checks.yml. Mirrors the smokeTest shape above.
+val uiTestSourceSet = sourceSets.create("uiTest") {
+    compileClasspath += sourceSets["main"].output
+    runtimeClasspath += output + compileClasspath
+}
+
+configurations["uiTestImplementation"].extendsFrom(configurations["testImplementation"])
+configurations["uiTestRuntimeOnly"].extendsFrom(configurations["testRuntimeOnly"])
+
+// Give the uiTest compilation friend access to main's `internal` declarations. The built-in
+// `test` source set gets this automatically; a hand-created source set does not. This is what
+// lets UI tests exercise `internal` composables (e.g. the Linking panes) without making them
+// public.
+kotlin.target.compilations.getByName("uiTest")
+    .associateWith(kotlin.target.compilations.getByName("main"))
+
+dependencies {
+    // compose.uiTest provides runComposeUiTest / ComposeUiTest (experimental → opt-in here). It's
+    // the rule-free API, so it runs under the existing JUnit5 platform with no junit-vintage and
+    // no compose.desktop.uiTestJUnit4.
+    @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+    add("uiTestImplementation", compose.uiTest)
+    // Skiko + AWT runtime for the host OS — required on the test runtime classpath or setContent
+    // can't load the native renderer. Added explicitly rather than leaning on the extendsFrom
+    // chain.
+    add("uiTestImplementation", compose.desktop.currentOs)
+}
+
+tasks.register<Test>("uiTest") {
+    description = "Compose UI tests via runComposeUiTest. Needs a display (Xvfb on Linux) and the " +
+        "Skiko software renderer. Excluded from `check`; run explicitly or via the ui-tests CI job."
+    group = "verification"
+    testClassesDirs = uiTestSourceSet.output.classesDirs
+    classpath = uiTestSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    // Skiko can't get a hardware GL context under Xvfb; force software rendering. Set on the task
+    // so local `./gradlew uiTest` matches CI without anyone exporting the env var by hand.
+    environment("SKIKO_RENDER_API", "SOFTWARE")
+    // Rendering depends on host state (Skiko version, display, fonts) the way smokeTest depends on
+    // a live server — a cached UP-TO-DATE result could mask a real failure after the env shifts.
+    outputs.upToDateWhen { false }
+}
+
 // One-shot utility for the screenshot CI workflow. Boots a "phantom phone" peer against a
 // local sync-server, uploads its meta payload, and writes a LinkingData blob the desktop can
 // paste into its Linking screen. Run via `./gradlew bootstrapScreenshotPeer --args="..."` from
@@ -266,6 +312,14 @@ tasks.named("compileKotlin") { dependsOn(generateBuildConfig) }
 // Wire Kover reports into `check`. Report-only — no threshold gate. Generated BuildConfig
 // excluded because it's a one-liner constant with no logic worth measuring.
 kover {
+    // Kover report tasks trigger EVERY Test task in the project, and `check` depends on the kover
+    // reports. Without this, `./gradlew check` would pull `uiTest` into the headless matrix where
+    // it can't render. Excluding it here keeps the UI tests opt-in (their own task + CI job).
+    currentProject {
+        instrumentation {
+            disabledForTestTasks.add("uiTest")
+        }
+    }
     reports {
         filters {
             excludes {

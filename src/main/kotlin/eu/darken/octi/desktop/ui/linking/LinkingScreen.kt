@@ -144,7 +144,7 @@ fun LinkingScreen() {
 }
 
 @Composable
-private fun ExistingAccountPane(
+internal fun ExistingAccountPane(
     rawCode: String,
     onRawCodeChange: (String) -> Unit,
     onSubmit: () -> Unit,
@@ -182,7 +182,7 @@ private fun ExistingAccountPane(
 }
 
 @Composable
-private fun NewAccountPane(
+internal fun NewAccountPane(
     serverUrl: String,
     onServerUrlChange: (String) -> Unit,
     onCreate: () -> Unit,
